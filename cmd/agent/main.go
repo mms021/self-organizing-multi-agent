@@ -30,10 +30,13 @@ func main() {
 
 	logger := log.New(os.Stderr, "", log.LstdFlags)
 
-	var caps []string
-	if *capsFlag != "" {
-		caps = strings.Split(*capsFlag, ",")
+	// An agent with no declared capabilities cannot be matched to any task,
+	// so the platform rejects the registration — fail here with something
+	// actionable instead of surfacing a 400 from the server.
+	if *capsFlag == "" {
+		logger.Fatal("-caps is required: declare at least one capability, e.g. -caps research,summarizing")
 	}
+	caps := strings.Split(*capsFlag, ",")
 
 	a := &agent.Agent{
 		Client:   agent.NewClient(*base),

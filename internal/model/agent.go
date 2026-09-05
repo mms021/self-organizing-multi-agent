@@ -1,5 +1,7 @@
 package model
 
+import "fmt"
+
 // Agent lifecycle statuses this milestone tracks (RFC-1400 §1, trimmed —
 // COMPLETED/FAILED are per-task outcomes recorded on Task, not Agent).
 const (
@@ -31,6 +33,19 @@ type RegisterRequest struct {
 }
 
 func (r *RegisterRequest) Validate() *APIError {
+	// RFC-1400 §7 requires capabilities, skills, constraints and
+	// preferred_roles. Only capabilities is enforced: it is what tasks are
+	// matched against, so an agent without it cannot be given work. The other
+	// three are optional here — preferred_roles in particular refers to Roles
+	// (RFC-1200), which this milestone does not implement.
+	if len(r.Capabilities) == 0 {
+		return ValidationError("capabilities is required: an agent with no capabilities cannot be matched to any task")
+	}
+	for i, c := range r.Capabilities {
+		if c.Name == "" {
+			return ValidationError(fmt.Sprintf("capabilities[%d].name is required", i))
+		}
+	}
 	if r.CurrentLoad != nil && (*r.CurrentLoad < 0 || *r.CurrentLoad > 1) {
 		return ValidationError("current_load must be between 0 and 1")
 	}

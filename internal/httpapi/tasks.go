@@ -12,17 +12,17 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 
 	var req model.CreateTaskRequest
 	if aerr := decodeJSON(r, &req); aerr != nil {
-		writeErr(w, aerr)
+		s.writeErr(w, aerr)
 		return
 	}
 	if aerr := req.Validate(); aerr != nil {
-		writeErr(w, aerr)
+		s.writeErr(w, aerr)
 		return
 	}
 
 	task, err := s.Tasks.Create(r.Context(), agentID, req, r.Header.Get("Idempotency-Key"))
 	if err != nil {
-		writeErr(w, err)
+		s.writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, task)
@@ -40,7 +40,7 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 
 	tasks, next, err := s.Tasks.List(r.Context(), filter)
 	if err != nil {
-		writeErr(w, err)
+		s.writeErr(w, err)
 		return
 	}
 	if tasks == nil {
@@ -52,7 +52,7 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	task, err := s.Tasks.Get(r.Context(), r.PathValue("task_id"))
 	if err != nil {
-		writeErr(w, err)
+		s.writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, task)
@@ -62,7 +62,7 @@ func (s *Server) handleClaimTask(w http.ResponseWriter, r *http.Request) {
 	agentID, _ := AgentIDFromContext(r.Context())
 	task, err := s.Tasks.Claim(r.Context(), r.PathValue("task_id"), agentID)
 	if err != nil {
-		writeErr(w, err)
+		s.writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, task)
@@ -73,17 +73,17 @@ func (s *Server) handleVerifyTask(w http.ResponseWriter, r *http.Request) {
 
 	var req model.VerifyRequest
 	if aerr := decodeJSON(r, &req); aerr != nil {
-		writeErr(w, aerr)
+		s.writeErr(w, aerr)
 		return
 	}
 	if aerr := req.Validate(); aerr != nil {
-		writeErr(w, aerr)
+		s.writeErr(w, aerr)
 		return
 	}
 
 	task, verification, err := s.Tasks.Verify(r.Context(), r.PathValue("task_id"), agentID, req)
 	if err != nil {
-		writeErr(w, err)
+		s.writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, model.VerifyResponse{Task: task, Verification: verification})

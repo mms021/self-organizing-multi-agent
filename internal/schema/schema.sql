@@ -68,6 +68,62 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_inbox ON messages(recipient, seq);
 CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id);
 
+-- Projects (RFC-1250). Only `open` visibility is implemented: records are
+-- grouped by project but visible to everyone, which is exactly RFC-1250 §11's
+-- open-project rule. `closed` needs membership enforcement (§5-§8) and is
+-- rejected at the API until that lands, rather than offering isolation that
+-- does not actually isolate.
+CREATE TABLE IF NOT EXISTS projects (
+  project_id TEXT PRIMARY KEY,
+  schema_version TEXT NOT NULL DEFAULT '1.0',
+  name TEXT NOT NULL,
+  objective TEXT NOT NULL DEFAULT '',
+  visibility TEXT NOT NULL DEFAULT 'open',
+  listed INTEGER NOT NULL DEFAULT 1,
+  owner TEXT NOT NULL REFERENCES agents(agent_id),
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  metadata TEXT NOT NULL DEFAULT '{}'
+);
+
+-- Shared memory (RFC-1300). project_id NULL means global: visible to every
+-- agent (RFC-1250 §11).
+CREATE TABLE IF NOT EXISTS knowledge (
+  knowledge_id TEXT PRIMARY KEY,
+  schema_version TEXT NOT NULL DEFAULT '1.0',
+  category TEXT NOT NULL,
+  author TEXT NOT NULL REFERENCES agents(agent_id),
+  content TEXT NOT NULL DEFAULT '{}',
+  source TEXT,
+  confidence REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'proposed',
+  tags TEXT NOT NULL DEFAULT '[]',
+  refs TEXT NOT NULL DEFAULT '[]',
+  project_id TEXT REFERENCES projects(project_id),
+  task_id TEXT,
+  supersedes TEXT,
+  superseded_by TEXT,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_scope ON knowledge(project_id, status, category);
+CREATE INDEX IF NOT EXISTS idx_knowledge_task ON knowledge(task_id);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+  artifact_id TEXT PRIMARY KEY,
+  schema_version TEXT NOT NULL DEFAULT '1.0',
+  type TEXT NOT NULL,
+  uri TEXT NOT NULL,
+  checksum TEXT NOT NULL,
+  created_by TEXT NOT NULL REFERENCES agents(agent_id),
+  task_id TEXT,
+  project_id TEXT REFERENCES projects(project_id),
+  size INTEGER NOT NULL DEFAULT 0,
+  retention TEXT NOT NULL DEFAULT 'permanent',
+  expires_at TEXT,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS verifications (
   verification_id TEXT PRIMARY KEY,
   schema_version TEXT NOT NULL DEFAULT '1.0',

@@ -33,6 +33,10 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 			"POST /messages", "GET /messages",
 			"POST /tasks", "GET /tasks", "GET /tasks/{task_id}",
 			"POST /tasks/{task_id}/claim", "POST /tasks/{task_id}/verify",
+			"POST /memory/entries", "GET /memory/entries/{knowledge_id}",
+			"POST /memory/entries/{knowledge_id}/review", "GET /memory/search",
+			"POST /artifacts", "GET /artifacts/{artifact_id}",
+			"POST /projects", "GET /projects/{project_id}", "GET /discovery/projects",
 		},
 	})
 }

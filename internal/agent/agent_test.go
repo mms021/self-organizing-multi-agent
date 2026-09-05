@@ -30,6 +30,9 @@ func newPlatform(t *testing.T) *httptest.Server {
 		Credentials: store.NewCredentialStore(sqlDB),
 		Tasks:       store.NewTaskStore(sqlDB),
 		Messages:    store.NewMessageStore(sqlDB),
+		Knowledge:   store.NewKnowledgeStore(sqlDB),
+		Artifacts:   store.NewArtifactStore(sqlDB),
+		Projects:    store.NewProjectStore(sqlDB),
 		Bus:         bus.NewFake(),
 		DB:          sqlDB,
 	}))
@@ -96,6 +99,63 @@ func TestTwoAgentsCompleteATask(t *testing.T) {
 	if final.Status != model.TaskCompleted {
 		t.Fatalf("expected COMPLETED after creator verified, got %s", final.Status)
 	}
+}
+
+// Knowledge must actually flow: an agent publishes what it learned, and the
+// next agent working a related task finds it and works with it in hand.
+func TestKnowledgeIsPublishedAndReused(t *testing.T) {
+	ctx := context.Background()
+	platform := newPlatform(t)
+
+	creator := newAgent(t, platform.URL, "creator")
+	worker := newAgent(t, platform.URL, "worker")
+
+	first, err := creator.Client.CreateTask(ctx, model.CreateTaskRequest{Objective: "index the archive"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := worker.RunOnce(ctx, 0); err != nil {
+		t.Fatalf("worker iteration: %v", err)
+	}
+
+	// Working the task must have left a lesson behind.
+	entries, err := creator.Client.SearchKnowledge(ctx, "index the archive", nil, 10)
+	if err != nil {
+		t.Fatalf("search knowledge: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no knowledge published after completing a task")
+	}
+	lesson := entries[0]
+	if lesson.Category != model.KnowledgeLesson {
+		t.Errorf("expected a lesson, got %s", lesson.Category)
+	}
+	if lesson.Status != model.KnowledgeProposed {
+		t.Errorf("a self-reported lesson must start as proposed, got %s", lesson.Status)
+	}
+	if lesson.TaskID == nil || *lesson.TaskID != first.TaskID {
+		t.Errorf("lesson is not linked back to its task: %+v", lesson.TaskID)
+	}
+
+	// A second, similar task should now be worked with that lesson in hand —
+	// EchoBrain reports how many entries it was handed.
+	if _, err := creator.Client.CreateTask(ctx, model.CreateTaskRequest{Objective: "index the archive"}); err != nil {
+		t.Fatalf("create second task: %v", err)
+	}
+	if _, err := worker.RunOnce(ctx, 0); err != nil {
+		t.Fatalf("second worker iteration: %v", err)
+	}
+
+	msgs, err := creator.Client.Inbox(ctx, 0)
+	if err != nil {
+		t.Fatalf("inbox: %v", err)
+	}
+	for _, m := range msgs {
+		if m.Type == "RESULT" && strings.Contains(string(m.Payload), "reused") {
+			return
+		}
+	}
+	t.Fatal("second task was worked without reusing the published knowledge")
 }
 
 // The creator must not claim its own task: it would then be the RESULT's

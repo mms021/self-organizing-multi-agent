@@ -21,27 +21,27 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 
 	var env model.Envelope
 	if aerr := decodeJSON(r, &env); aerr != nil {
-		writeErr(w, aerr)
+		s.writeErr(w, aerr)
 		return
 	}
 	if aerr := env.Validate(); aerr != nil {
-		writeErr(w, aerr)
+		s.writeErr(w, aerr)
 		return
 	}
 	if env.Sender != agentID {
-		writeErr(w, model.AccessDenied("sender must equal the authenticated agent"))
+		s.writeErr(w, model.AccessDenied("sender must equal the authenticated agent"))
 		return
 	}
 	if env.Recipient != model.BroadcastRecipient {
 		if _, err := s.Agents.Get(r.Context(), env.Recipient); err != nil {
-			writeErr(w, err)
+			s.writeErr(w, err)
 			return
 		}
 	}
 
 	stored, isNew, err := s.Messages.Insert(r.Context(), env)
 	if err != nil {
-		writeErr(w, err)
+		s.writeErr(w, err)
 		return
 	}
 	if isNew {
@@ -83,7 +83,7 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 
 	msgs, next, err := s.Messages.List(r.Context(), filter, time.Now().UTC())
 	if err != nil {
-		writeErr(w, err)
+		s.writeErr(w, err)
 		return
 	}
 
@@ -96,7 +96,7 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 		case <-ch:
 			msgs, next, err = s.Messages.List(r.Context(), filter, time.Now().UTC())
 			if err != nil {
-				writeErr(w, err)
+				s.writeErr(w, err)
 				return
 			}
 		case <-ctx.Done():

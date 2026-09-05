@@ -162,7 +162,17 @@ func (a *Agent) takeOneTask(ctx context.Context) (bool, error) {
 		a.logf("claimed %s: %s", claimed.TaskID, claimed.Objective)
 		_ = a.sendStatus(ctx, "working", "on "+claimed.TaskID)
 
-		summary, status, err := a.Brain.Work(ctx, claimed)
+		// Look up what the group already knows before doing the work again
+		// (RFC-1300 §8). A failure here is not fatal — working without prior
+		// knowledge is worse, not impossible.
+		prior, kerr := a.Client.SearchKnowledge(ctx, claimed.Objective, claimed.ProjectID, 10)
+		if kerr != nil {
+			a.logf("knowledge search failed, working without it: %v", kerr)
+		} else if len(prior) > 0 {
+			a.logf("found %d prior knowledge entries for %s", len(prior), claimed.TaskID)
+		}
+
+		summary, status, err := a.Brain.Work(ctx, claimed, prior)
 		if err != nil {
 			return true, fmt.Errorf("brain work: %w", err)
 		}
@@ -171,10 +181,39 @@ func (a *Agent) takeOneTask(ctx context.Context) (bool, error) {
 			return true, fmt.Errorf("send result: %w", err)
 		}
 		a.logf("reported %s: %s", claimed.TaskID, status)
+
+		a.publishLesson(ctx, claimed, summary, status)
 		_ = a.sendStatus(ctx, "idle", "done with "+claimed.TaskID)
 		return true, nil
 	}
 	return false, nil
+}
+
+// publishLesson records what the agent learned into shared memory, scoped to
+// the task's project (or globally when the task has none). It lands as a
+// `lesson` in `proposed` status — an unverified claim, not an established
+// fact (RFC-1300 §5, RFC-1400 §5). Failure is logged, not fatal: the work
+// itself is already reported.
+func (a *Agent) publishLesson(ctx context.Context, task model.Task, summary, status string) {
+	entry, err := a.Client.PublishKnowledge(ctx, model.CreateKnowledgeRequest{
+		Category: model.KnowledgeLesson,
+		Content: map[string]any{
+			"summary":   summary,
+			"objective": task.Objective,
+			"outcome":   status,
+		},
+		Source:     task.TaskID,
+		Confidence: 0.5, // self-reported and unverified
+		Tags:       task.RequiredCapabilities,
+		References: []model.Reference{{Type: "task", ID: task.TaskID}},
+		ProjectID:  task.ProjectID,
+		TaskID:     &task.TaskID,
+	})
+	if err != nil {
+		a.logf("publish lesson for %s failed: %v", task.TaskID, err)
+		return
+	}
+	a.logf("published lesson %s for %s", entry.KnowledgeID, task.TaskID)
 }
 
 func (a *Agent) sendResult(ctx context.Context, task model.Task, summary, status string) error {

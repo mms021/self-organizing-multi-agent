@@ -38,9 +38,13 @@ func main() {
 		Credentials: store.NewCredentialStore(sqlDB),
 		Tasks:       store.NewTaskStore(sqlDB),
 		Messages:    store.NewMessageStore(sqlDB),
+		Knowledge:   store.NewKnowledgeStore(sqlDB),
+		Artifacts:   store.NewArtifactStore(sqlDB),
+		Projects:    store.NewProjectStore(sqlDB),
 		Bus:         redisBus,
 		DB:          sqlDB,
 		RedisPinger: redisBus,
+		Logger:      log.Default(),
 	}
 
 	httpServer := &http.Server{

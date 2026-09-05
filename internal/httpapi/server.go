@@ -7,7 +7,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
+	"runtime/debug"
 	"strings"
 
 	"aichatdeck/internal/bus"
@@ -26,9 +28,13 @@ type Server struct {
 	Credentials *store.CredentialStore
 	Tasks       *store.TaskStore
 	Messages    *store.MessageStore
+	Knowledge   *store.KnowledgeStore
+	Artifacts   *store.ArtifactStore
+	Projects    *store.ProjectStore
 	Bus         bus.Bus
 	DB          *sql.DB
 	RedisPinger Pinger
+	Logger      *log.Logger // nil silences server-side logging (tests)
 }
 
 func NewRouter(s *Server) http.Handler {
@@ -50,7 +56,37 @@ func NewRouter(s *Server) http.Handler {
 	mux.HandleFunc("POST /tasks/{task_id}/claim", s.RequireAuth(s.handleClaimTask))
 	mux.HandleFunc("POST /tasks/{task_id}/verify", s.RequireAuth(s.handleVerifyTask))
 
-	return mux
+	// Shared memory (RFC-1300) and its project scoping (RFC-1250).
+	mux.HandleFunc("POST /memory/entries", s.RequireAuth(s.handleCreateKnowledge))
+	mux.HandleFunc("GET /memory/entries/{knowledge_id}", s.RequireAuth(s.handleGetKnowledge))
+	mux.HandleFunc("POST /memory/entries/{knowledge_id}/review", s.RequireAuth(s.handleReviewKnowledge))
+	mux.HandleFunc("GET /memory/search", s.RequireAuth(s.handleSearchKnowledge))
+	mux.HandleFunc("POST /artifacts", s.RequireAuth(s.handleCreateArtifact))
+	mux.HandleFunc("GET /artifacts/{artifact_id}", s.RequireAuth(s.handleGetArtifact))
+	mux.HandleFunc("POST /projects", s.RequireAuth(s.handleCreateProject))
+	mux.HandleFunc("GET /projects/{project_id}", s.RequireAuth(s.handleGetProject))
+	mux.HandleFunc("GET /discovery/projects", s.RequireAuth(s.handleDiscoverProjects))
+
+	return s.recoverPanics(mux)
+}
+
+// recoverPanics keeps one bad request from tearing down the handler with no
+// trace: the panic is logged with its stack and reported as a plain 500.
+func (s *Server) recoverPanics(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				traceID := idgen.New("trace")
+				s.logf("panic [%s] %s %s: %v\n%s", traceID, r.Method, r.URL.Path, rec, debug.Stack())
+				model.WriteError(w, traceID, &model.APIError{
+					ErrorCode: "internal",
+					Message:   "internal error",
+					Retryable: true,
+				})
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // --- shared helpers ---
@@ -89,15 +125,30 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // writeErr maps a store/model error to the RFC-1000 §8 error body. Anything
-// that isn't a *model.APIError is an unexpected internal failure (500).
-func writeErr(w http.ResponseWriter, err error) {
+// that isn't a *model.APIError is an unexpected internal failure: it is
+// logged in full server-side and reported to the client as a bare 500 with
+// the trace_id. Internal error text (SQL strings, file paths) must not cross
+// the trust boundary — RFC-1600 §2 "communication".
+func (s *Server) writeErr(w http.ResponseWriter, err error) {
 	traceID := idgen.New("trace")
 	var apiErr *model.APIError
 	if errors.As(err, &apiErr) {
 		model.WriteError(w, traceID, apiErr)
 		return
 	}
-	model.WriteError(w, traceID, &model.APIError{ErrorCode: "internal", Message: err.Error(), Retryable: true})
+	s.logf("internal error [%s]: %v", traceID, err)
+	model.WriteError(w, traceID, &model.APIError{
+		ErrorCode: "internal",
+		Message:   "internal error",
+		Retryable: true,
+	})
+}
+
+func (s *Server) logf(format string, args ...any) {
+	if s.Logger == nil {
+		return
+	}
+	s.Logger.Printf(format, args...)
 }
 
 // decodeJSON rejects unknown fields — payloads MUST match their schema

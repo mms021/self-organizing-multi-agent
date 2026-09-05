@@ -16,8 +16,10 @@ import (
 // the whole platform can be exercised offline with EchoBrain and with a real
 // model in production.
 type Brain interface {
-	// Work produces a result summary for a task objective.
-	Work(ctx context.Context, task model.Task) (summary string, status string, err error)
+	// Work produces a result summary for a task objective. prior is whatever
+	// relevant shared memory the agent found before starting (RFC-1300) —
+	// reusing it is the point of having a knowledge base at all.
+	Work(ctx context.Context, task model.Task, prior []model.Knowledge) (summary string, status string, err error)
 	// Verify judges someone else's result against the task it claims to solve.
 	Verify(ctx context.Context, task model.Task, resultSummary string) (verdict, rationale string, err error)
 }
@@ -26,8 +28,12 @@ type Brain interface {
 // It exists so the full agent loop can be tested and demoed offline.
 type EchoBrain struct{}
 
-func (EchoBrain) Work(_ context.Context, task model.Task) (string, string, error) {
-	return "echo: " + task.Objective, "success", nil
+func (EchoBrain) Work(_ context.Context, task model.Task, prior []model.Knowledge) (string, string, error) {
+	summary := "echo: " + task.Objective
+	if len(prior) > 0 {
+		summary += fmt.Sprintf(" (reused %d prior knowledge entries)", len(prior))
+	}
+	return summary, "success", nil
 }
 
 func (EchoBrain) Verify(_ context.Context, task model.Task, resultSummary string) (string, string, error) {
@@ -81,7 +87,7 @@ func (b *ClaudeBrain) ask(ctx context.Context, prompt string) (string, error) {
 	return strings.TrimSpace(sb.String()), nil
 }
 
-func (b *ClaudeBrain) Work(ctx context.Context, task model.Task) (string, string, error) {
+func (b *ClaudeBrain) Work(ctx context.Context, task model.Task, prior []model.Knowledge) (string, string, error) {
 	prompt := fmt.Sprintf(`Ты взял задачу на платформе. Выполни её и опиши результат.
 
 objective: %s
@@ -91,6 +97,10 @@ constraints: %v
 Ответь кратким summary результата — тем, что другой агент сможет проверить.
 Первая строка ответа: SUCCESS, PARTIAL или FAILURE. Дальше — summary.`,
 		task.Objective, task.SuccessCriteria, task.Constraints)
+
+	if known := formatKnowledge(prior); known != "" {
+		prompt += "\n\nЧто уже известно из общей памяти (используй, не переоткрывай):\n" + known
+	}
 
 	out, err := b.ask(ctx, prompt)
 	if err != nil {
@@ -148,4 +158,22 @@ func splitFirstLine(s string) (first, rest string) {
 		rest = strings.TrimSpace(parts[1])
 	}
 	return first, rest
+}
+
+// formatKnowledge renders shared-memory entries for a prompt, marking each
+// one's status so the model can tell a verified fact from an unproven
+// hypothesis (RFC-1300 §5).
+func formatKnowledge(entries []model.Knowledge) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, k := range entries {
+		summary, _ := k.Content["summary"].(string)
+		if summary == "" {
+			summary = fmt.Sprintf("%v", k.Content)
+		}
+		fmt.Fprintf(&sb, "- [%s/%s] %s\n", k.Category, k.Status, summary)
+	}
+	return sb.String()
 }

@@ -30,6 +30,9 @@ func newTestServer(t *testing.T) *httptest.Server {
 		Credentials: store.NewCredentialStore(sqlDB),
 		Tasks:       store.NewTaskStore(sqlDB),
 		Messages:    store.NewMessageStore(sqlDB),
+		Knowledge:   store.NewKnowledgeStore(sqlDB),
+		Artifacts:   store.NewArtifactStore(sqlDB),
+		Projects:    store.NewProjectStore(sqlDB),
 		Bus:         bus.NewFake(),
 		DB:          sqlDB,
 	}
@@ -70,10 +73,18 @@ func (c *client) do(method, path string, body any) (int, map[string]any) {
 	return resp.StatusCode, out
 }
 
+// registerBody is the minimum a registration must carry: capabilities is
+// what tasks are matched against (RFC-1000 §5).
+func registerBody() map[string]any {
+	return map[string]any{
+		"capabilities": []map[string]any{{"name": "testing"}},
+	}
+}
+
 func register(t *testing.T, base string) *client {
 	t.Helper()
 	c := &client{t: t, base: base}
-	status, out := c.do(http.MethodPost, "/agents/register", map[string]any{})
+	status, out := c.do(http.MethodPost, "/agents/register", registerBody())
 	if status != http.StatusCreated {
 		t.Fatalf("register: expected 201, got %d: %v", status, out)
 	}
@@ -187,7 +198,7 @@ func mustAgentID(t *testing.T, c *client) string {
 	t.Helper()
 	// The token->agent_id mapping isn't otherwise exposed to the client, so
 	// re-derive it via the idempotent re-register path (same credential).
-	status, out := c.do(http.MethodPost, "/agents/register", map[string]any{})
+	status, out := c.do(http.MethodPost, "/agents/register", registerBody())
 	if status != http.StatusOK {
 		t.Fatalf("re-register to resolve agent_id: expected 200, got %d: %v", status, out)
 	}

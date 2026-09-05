@@ -142,6 +142,42 @@ func (c *Client) PostMessage(ctx context.Context, env model.Envelope) (model.Env
 	return out, c.do(ctx, http.MethodPost, "/messages", env, &out)
 }
 
+// PublishKnowledge writes a record into shared memory (RFC-1300). It lands
+// as `proposed` — only verification can promote it further.
+func (c *Client) PublishKnowledge(ctx context.Context, req model.CreateKnowledgeRequest) (model.Knowledge, error) {
+	var out model.Knowledge
+	return out, c.do(ctx, http.MethodPost, "/memory/entries", req, &out)
+}
+
+// SearchKnowledge queries shared memory. projectID nil searches every scope;
+// a project id returns that project's records plus global ones.
+func (c *Client) SearchKnowledge(ctx context.Context, query string, projectID *string, limit int) ([]model.Knowledge, error) {
+	q := url.Values{}
+	if query != "" {
+		q.Set("q", query)
+	}
+	if projectID != nil {
+		q.Set("project_id", *projectID)
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	var out struct {
+		Entries []model.Knowledge `json:"entries"`
+	}
+	return out.Entries, c.do(ctx, http.MethodGet, "/memory/search?"+q.Encode(), nil, &out)
+}
+
+func (c *Client) CreateArtifact(ctx context.Context, req model.CreateArtifactRequest) (model.Artifact, error) {
+	var out model.Artifact
+	return out, c.do(ctx, http.MethodPost, "/artifacts", req, &out)
+}
+
+func (c *Client) CreateProject(ctx context.Context, req model.CreateProjectRequest) (model.Project, error) {
+	var out model.Project
+	return out, c.do(ctx, http.MethodPost, "/projects", req, &out)
+}
+
 // Inbox drains new messages addressed to this agent, advancing the cursor so
 // the same message is never returned twice. waitSeconds > 0 turns this into a
 // long-poll (the server wakes it via Redis pub/sub the moment something
