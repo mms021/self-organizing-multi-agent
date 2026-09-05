@@ -45,7 +45,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idem ON tasks(created_by, idempotenc
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 
 CREATE TABLE IF NOT EXISTS messages (
-  message_id TEXT PRIMARY KEY,
+  -- seq is the inbox cursor key: a monotonic insertion sequence. Paginating
+  -- on received_at instead would be wrong — several messages routinely land
+  -- in the same second, and any tie-break on message_id (a random uuid)
+  -- orders them arbitrarily, letting a cursor skip a message permanently.
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id TEXT NOT NULL UNIQUE,
   protocol_version TEXT NOT NULL,
   type TEXT NOT NULL,
   sender TEXT NOT NULL,
@@ -60,7 +65,7 @@ CREATE TABLE IF NOT EXISTS messages (
   ttl INTEGER,
   received_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_messages_inbox ON messages(recipient, received_at);
+CREATE INDEX IF NOT EXISTS idx_messages_inbox ON messages(recipient, seq);
 CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id);
 
 CREATE TABLE IF NOT EXISTS verifications (

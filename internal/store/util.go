@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/base64"
 	"encoding/json"
+	"strconv"
 	"strings"
 )
 
@@ -47,6 +48,25 @@ func nullIfEmpty(s string) any {
 
 func isUniqueViolation(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
+}
+
+// encodeSeqCursor/decodeSeqCursor carry a monotonic insertion sequence — the
+// message inbox pages on that rather than on a timestamp, which is not unique
+// enough to order messages that arrive in the same second.
+func encodeSeqCursor(seq int64) string {
+	return base64.URLEncoding.EncodeToString([]byte(strconv.FormatInt(seq, 10)))
+}
+
+func decodeSeqCursor(cursor string) (int64, bool) {
+	b, err := base64.URLEncoding.DecodeString(cursor)
+	if err != nil {
+		return 0, false
+	}
+	seq, err := strconv.ParseInt(string(b), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return seq, true
 }
 
 func encodeCursor(ts, id string) string {
