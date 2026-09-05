@@ -35,11 +35,13 @@ func (s *ArtifactStore) Create(ctx context.Context, createdBy string, req model.
 	if err != nil {
 		return model.Artifact{}, err
 	}
-	return s.Get(ctx, id)
+	return s.Get(ctx, createdBy, id)
 }
 
-func (s *ArtifactStore) Get(ctx context.Context, id string) (model.Artifact, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+artifactColumns+` FROM artifacts WHERE artifact_id=?`, id)
+func (s *ArtifactStore) Get(ctx context.Context, viewer, id string) (model.Artifact, error) {
+	args := append([]any{id}, visibleScopeArgs(viewer, true)...)
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+artifactColumns+` FROM artifacts WHERE artifact_id=? AND `+visibleScopeSQL("task_id"), args...)
 
 	var a model.Artifact
 	var taskID, projectID, expiresAt sql.NullString

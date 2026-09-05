@@ -38,7 +38,8 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 		filter.RequiredCapabilities = strings.Split(caps, ",")
 	}
 
-	tasks, next, err := s.Tasks.List(r.Context(), filter)
+	agentID, _ := AgentIDFromContext(r.Context())
+	tasks, next, err := s.Tasks.List(r.Context(), agentID, filter)
 	if err != nil {
 		s.writeErr(w, err)
 		return
@@ -50,7 +51,8 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
-	task, err := s.Tasks.Get(r.Context(), r.PathValue("task_id"))
+	agentID, _ := AgentIDFromContext(r.Context())
+	task, err := s.Tasks.Get(r.Context(), agentID, r.PathValue("task_id"))
 	if err != nil {
 		s.writeErr(w, err)
 		return

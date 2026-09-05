@@ -41,7 +41,7 @@ func TestKnowledgeGlobalAndProjectScope(t *testing.T) {
 	mk("beta thing", &other.ProjectID)
 
 	// Global-only scope.
-	entries, _, err := knowledge.Search(ctx, model.KnowledgeFilter{ProjectID: strptr("")})
+	entries, _, err := knowledge.Search(ctx, author.AgentID, model.KnowledgeFilter{ProjectID: strptr("")})
 	if err != nil {
 		t.Fatalf("search global: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestKnowledgeGlobalAndProjectScope(t *testing.T) {
 
 	// Project scope sees its own records plus global ones, never another
 	// project's.
-	entries, _, err = knowledge.Search(ctx, model.KnowledgeFilter{ProjectID: &proj.ProjectID})
+	entries, _, err = knowledge.Search(ctx, author.AgentID, model.KnowledgeFilter{ProjectID: &proj.ProjectID})
 	if err != nil {
 		t.Fatalf("search project: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestKnowledgeSupersedeChain(t *testing.T) {
 	}
 
 	// The old record is archived but preserved, linked both ways (RFC-1300 §9).
-	old, err := knowledge.Get(ctx, first.KnowledgeID)
+	old, err := knowledge.Get(ctx, author.AgentID, first.KnowledgeID)
 	if err != nil {
 		t.Fatalf("get superseded: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestKnowledgeSupersedeChain(t *testing.T) {
 	}
 
 	// Archived records are excluded from search by default.
-	entries, _, err := knowledge.Search(ctx, model.KnowledgeFilter{})
+	entries, _, err := knowledge.Search(ctx, author.AgentID, model.KnowledgeFilter{})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestKnowledgeReviewOnlyFromProposed(t *testing.T) {
 		t.Fatalf("expected proposed on creation, got %s", entry.Status)
 	}
 
-	reviewed, err := knowledge.Review(ctx, entry.KnowledgeID)
+	reviewed, err := knowledge.Review(ctx, author.AgentID, entry.KnowledgeID)
 	if err != nil {
 		t.Fatalf("review: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestKnowledgeReviewOnlyFromProposed(t *testing.T) {
 		t.Fatalf("expected reviewed, got %s", reviewed.Status)
 	}
 
-	if _, err := knowledge.Review(ctx, entry.KnowledgeID); err == nil {
+	if _, err := knowledge.Review(ctx, author.AgentID, entry.KnowledgeID); err == nil {
 		t.Fatal("expected a second review to conflict")
 	}
 }
@@ -174,14 +174,5 @@ func TestArtifactRequiresChecksum(t *testing.T) {
 	req := model.CreateArtifactRequest{Type: "file", URI: "file:///tmp/x"}
 	if err := req.Validate(); err == nil {
 		t.Fatal("expected an artifact without a checksum to be rejected")
-	}
-}
-
-// Closed projects must be refused while membership enforcement is unbuilt —
-// accepting one would promise isolation the platform cannot deliver.
-func TestClosedProjectRejected(t *testing.T) {
-	req := model.CreateProjectRequest{Name: "secret", Visibility: model.ProjectClosed}
-	if err := req.Validate(); err == nil {
-		t.Fatal("expected closed visibility to be rejected")
 	}
 }

@@ -30,7 +30,8 @@ func (s *Server) handleCreateKnowledge(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetKnowledge(w http.ResponseWriter, r *http.Request) {
-	entry, err := s.Knowledge.Get(r.Context(), r.PathValue("knowledge_id"))
+	agentID, _ := AgentIDFromContext(r.Context())
+	entry, err := s.Knowledge.Get(r.Context(), agentID, r.PathValue("knowledge_id"))
 	if err != nil {
 		s.writeErr(w, err)
 		return
@@ -39,7 +40,8 @@ func (s *Server) handleGetKnowledge(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReviewKnowledge(w http.ResponseWriter, r *http.Request) {
-	entry, err := s.Knowledge.Review(r.Context(), r.PathValue("knowledge_id"))
+	agentID, _ := AgentIDFromContext(r.Context())
+	entry, err := s.Knowledge.Review(r.Context(), agentID, r.PathValue("knowledge_id"))
 	if err != nil {
 		s.writeErr(w, err)
 		return
@@ -78,7 +80,8 @@ func (s *Server) handleSearchKnowledge(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	entries, next, err := s.Knowledge.Search(r.Context(), filter)
+	agentID, _ := AgentIDFromContext(r.Context())
+	entries, next, err := s.Knowledge.Search(r.Context(), agentID, filter)
 	if err != nil {
 		s.writeErr(w, err)
 		return
@@ -111,7 +114,8 @@ func (s *Server) handleCreateArtifact(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetArtifact(w http.ResponseWriter, r *http.Request) {
-	artifact, err := s.Artifacts.Get(r.Context(), r.PathValue("artifact_id"))
+	agentID, _ := AgentIDFromContext(r.Context())
+	artifact, err := s.Artifacts.Get(r.Context(), agentID, r.PathValue("artifact_id"))
 	if err != nil {
 		s.writeErr(w, err)
 		return
@@ -140,17 +144,9 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, project)
 }
 
-func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
-	project, err := s.Projects.Get(r.Context(), r.PathValue("project_id"))
-	if err != nil {
-		s.writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, project)
-}
-
 func (s *Server) handleDiscoverProjects(w http.ResponseWriter, r *http.Request) {
-	projects, err := s.Projects.List(r.Context())
+	agentID, _ := AgentIDFromContext(r.Context())
+	projects, err := s.Projects.List(r.Context(), agentID)
 	if err != nil {
 		s.writeErr(w, err)
 		return

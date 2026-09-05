@@ -30,6 +30,7 @@ func newBreakableServer(t *testing.T) (*httptest.Server, *sql.DB) {
 		Knowledge:   store.NewKnowledgeStore(sqlDB),
 		Artifacts:   store.NewArtifactStore(sqlDB),
 		Projects:    store.NewProjectStore(sqlDB),
+		Members:     store.NewMembershipStore(sqlDB),
 		Bus:         bus.NewFake(),
 		DB:          sqlDB,
 		// Logger stays nil: the failure is expected, no need to print it.
@@ -136,7 +137,8 @@ func TestBadRequestBodiesAreValidationErrors(t *testing.T) {
 		{"bad category", "/memory/entries", map[string]any{"category": "gossip", "content": map[string]any{"a": 1}}},
 		{"empty content", "/memory/entries", map[string]any{"category": "lesson", "content": map[string]any{}}},
 		{"artifact without checksum", "/artifacts", map[string]any{"type": "file", "uri": "file:///x"}},
-		{"closed project", "/projects", map[string]any{"name": "p", "visibility": "closed"}},
+		{"bad visibility", "/projects", map[string]any{"name": "p", "visibility": "secret"}},
+		{"listed on an open project", "/projects", map[string]any{"name": "p", "listed": false}},
 	}
 	for _, tc := range cases {
 		status, body := c.do(http.MethodPost, tc.path, tc.body)

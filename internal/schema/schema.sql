@@ -80,11 +80,31 @@ CREATE TABLE IF NOT EXISTS projects (
   objective TEXT NOT NULL DEFAULT '',
   visibility TEXT NOT NULL DEFAULT 'open',
   listed INTEGER NOT NULL DEFAULT 1,
+  membership_policy TEXT NOT NULL DEFAULT 'invite_only',
   owner TEXT NOT NULL REFERENCES agents(agent_id),
   status TEXT NOT NULL DEFAULT 'active',
   created_at TEXT NOT NULL,
   metadata TEXT NOT NULL DEFAULT '{}'
 );
+
+-- Project membership (RFC-1250 §7). Rows exist only for closed projects:
+-- open ones are visible to everyone, so there is nothing to record.
+--
+-- invited_by distinguishes the two pending shapes (RFC-1250 §7): non-null
+-- means the project invited the agent and the agent must accept; null means
+-- the agent applied and the owner must approve.
+CREATE TABLE IF NOT EXISTS project_members (
+  project_id TEXT NOT NULL REFERENCES projects(project_id),
+  agent_id TEXT NOT NULL REFERENCES agents(agent_id),
+  status TEXT NOT NULL,            -- invited|active|revoked|left|reviewer
+  invited_by TEXT,
+  joined_at TEXT,
+  scope TEXT,                      -- reviewer only: the single task_id in view
+  expires_at TEXT,                 -- reviewer only: mandatory time box
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (project_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS idx_members_agent ON project_members(agent_id, status);
 
 -- Shared memory (RFC-1300). project_id NULL means global: visible to every
 -- agent (RFC-1250 §11).

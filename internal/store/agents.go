@@ -106,7 +106,7 @@ func (s *AgentStore) Get(ctx context.Context, agentID string) (model.Agent, erro
 	a.Capabilities = fromJSON[[]model.Capability](capsJSON)
 	a.Constraints = fromJSON[map[string]any](constraintsJSON)
 	a.Metadata = fromJSON[map[string]any](metadataJSON)
-	a.Roles = []string{}          // Roles (RFC-1200) out of scope this milestone.
+	a.Roles = []string{}            // Roles (RFC-1200) out of scope this milestone.
 	a.Reputation = map[string]any{} // Reputation (RFC-1500) out of scope this milestone.
 	return a, nil
 }

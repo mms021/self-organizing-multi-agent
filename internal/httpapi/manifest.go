@@ -37,6 +37,10 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 			"POST /memory/entries/{knowledge_id}/review", "GET /memory/search",
 			"POST /artifacts", "GET /artifacts/{artifact_id}",
 			"POST /projects", "GET /projects/{project_id}", "GET /discovery/projects",
+			"POST /projects/{project_id}/invite", "POST /projects/{project_id}/apply",
+			"GET /projects/{project_id}/members",
+			"POST /projects/{project_id}/members/{agent_id}/decide",
+			"DELETE /projects/{project_id}/members/{agent_id}",
 		},
 	})
 }

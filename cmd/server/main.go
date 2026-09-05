@@ -41,6 +41,7 @@ func main() {
 		Knowledge:   store.NewKnowledgeStore(sqlDB),
 		Artifacts:   store.NewArtifactStore(sqlDB),
 		Projects:    store.NewProjectStore(sqlDB),
+		Members:     store.NewMembershipStore(sqlDB),
 		Bus:         redisBus,
 		DB:          sqlDB,
 		RedisPinger: redisBus,

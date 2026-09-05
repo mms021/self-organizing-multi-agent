@@ -41,11 +41,11 @@ func (s *TaskStore) Create(ctx context.Context, createdBy string, req model.Crea
 			if serr := row.Scan(&existingID); serr != nil {
 				return model.Task{}, serr
 			}
-			return s.Get(ctx, existingID)
+			return s.Get(ctx, createdBy, existingID)
 		}
 		return model.Task{}, err
 	}
-	return s.Get(ctx, taskID)
+	return s.Get(ctx, createdBy, taskID)
 }
 
 func scanTask(row interface{ Scan(...any) error }) (model.Task, error) {
@@ -84,8 +84,13 @@ func scanTask(row interface{ Scan(...any) error }) (model.Task, error) {
 
 const taskColumns = `task_id, schema_version, objective, context, constraints, required_capabilities, success_criteria, status, owner, team_id, project_id, created_by, created_at, deadline`
 
-func (s *TaskStore) Get(ctx context.Context, taskID string) (model.Task, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE task_id=?`, taskID)
+// Get returns a task if the viewer may see it. A task inside a closed project
+// the viewer does not belong to reports not_found, not access_denied —
+// confirming a task_id exists is itself a leak (RFC-1250 §13).
+func (s *TaskStore) Get(ctx context.Context, viewer, taskID string) (model.Task, error) {
+	args := append([]any{taskID}, visibleScopeArgs(viewer, true)...)
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+taskColumns+` FROM tasks WHERE task_id=? AND `+visibleScopeSQL("task_id"), args...)
 	t, err := scanTask(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -99,14 +104,14 @@ func (s *TaskStore) Get(ctx context.Context, taskID string) (model.Task, error) 
 // List returns tasks matching filter, newest-first-created ascending keyset
 // pagination on (created_at, task_id). required_capabilities is matched in
 // Go (any overlap) rather than in SQL, since it's a JSON array column.
-func (s *TaskStore) List(ctx context.Context, filter model.TaskFilter) ([]model.Task, string, error) {
+func (s *TaskStore) List(ctx context.Context, viewer string, filter model.TaskFilter) ([]model.Task, string, error) {
 	limit := filter.Limit
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
 
-	var where []string
-	var args []any
+	where := []string{visibleScopeSQL("task_id")}
+	args := visibleScopeArgs(viewer, true)
 	if filter.Status != "" {
 		where = append(where, "status = ?")
 		args = append(args, filter.Status)
@@ -120,10 +125,7 @@ func (s *TaskStore) List(ctx context.Context, filter model.TaskFilter) ([]model.
 		args = append(args, ts, ts, id)
 	}
 
-	q := `SELECT ` + taskColumns + ` FROM tasks`
-	if len(where) > 0 {
-		q += " WHERE " + strings.Join(where, " AND ")
-	}
+	q := `SELECT ` + taskColumns + ` FROM tasks WHERE ` + strings.Join(where, " AND ")
 	// Fetch one extra row to know whether a next page exists, and fetch more
 	// than the page size when filtering by capability in Go so a capability
 	// filter doesn't starve the page.
@@ -183,19 +185,24 @@ func hasAnyCapability(have, want []string) bool {
 // Claim performs the OPEN -> CLAIMED compare-and-swap (RFC-1000 §8's own
 // example of a `conflict` error).
 func (s *TaskStore) Claim(ctx context.Context, taskID, agentID string) (model.Task, error) {
+	// Resolve through the scoped read first: a task in a closed project the
+	// claimer does not belong to must look absent, not merely unclaimable.
+	if _, err := s.Get(ctx, agentID, taskID); err != nil {
+		return model.Task{}, err
+	}
 	res, err := s.db.ExecContext(ctx, `UPDATE tasks SET status=?, owner=? WHERE task_id=? AND status=?`,
 		model.TaskClaimed, agentID, taskID, model.TaskOpen)
 	if err != nil {
 		return model.Task{}, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		existing, gerr := s.Get(ctx, taskID)
+		existing, gerr := s.Get(ctx, agentID, taskID)
 		if gerr != nil {
 			return model.Task{}, gerr
 		}
 		return model.Task{}, model.Conflict("task is not OPEN").WithDetails(map[string]string{"status": existing.Status})
 	}
-	return s.Get(ctx, taskID)
+	return s.Get(ctx, agentID, taskID)
 }
 
 // Verify checks the target RESULT message and transitions task status by
@@ -203,6 +210,10 @@ func (s *TaskStore) Claim(ctx context.Context, taskID, agentID string) (model.Ta
 // (RFC-1500 is out of scope) — just the basic invariant that an agent can't
 // verify its own RESULT.
 func (s *TaskStore) Verify(ctx context.Context, taskID, verifierID string, req model.VerifyRequest) (model.Task, model.Verification, error) {
+	if _, err := s.Get(ctx, verifierID, taskID); err != nil {
+		return model.Task{}, model.Verification{}, err
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return model.Task{}, model.Verification{}, err
@@ -270,7 +281,7 @@ func (s *TaskStore) Verify(ctx context.Context, taskID, verifierID string, req m
 		return model.Task{}, model.Verification{}, err
 	}
 
-	task, err := s.Get(ctx, taskID)
+	task, err := s.Get(ctx, verifierID, taskID)
 	if err != nil {
 		return model.Task{}, model.Verification{}, err
 	}

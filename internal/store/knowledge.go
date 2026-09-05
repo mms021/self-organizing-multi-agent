@@ -81,7 +81,7 @@ func (s *KnowledgeStore) Create(ctx context.Context, author string, req model.Cr
 	if err := tx.Commit(); err != nil {
 		return model.Knowledge{}, err
 	}
-	return s.Get(ctx, id)
+	return s.Get(ctx, author, id)
 }
 
 func scanKnowledge(row interface{ Scan(...any) error }) (model.Knowledge, error) {
@@ -118,8 +118,14 @@ func scanKnowledge(row interface{ Scan(...any) error }) (model.Knowledge, error)
 	return k, nil
 }
 
-func (s *KnowledgeStore) Get(ctx context.Context, id string) (model.Knowledge, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+knowledgeColumns+` FROM knowledge WHERE knowledge_id=?`, id)
+// Get returns one record if the viewer may see it. A record inside a closed
+// project the viewer does not belong to reports not_found rather than
+// access_denied: confirming that a knowledge_id exists is itself a leak
+// (RFC-1250 §13).
+func (s *KnowledgeStore) Get(ctx context.Context, viewer, id string) (model.Knowledge, error) {
+	args := append([]any{id}, visibleScopeArgs(viewer, true)...)
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+knowledgeColumns+` FROM knowledge WHERE knowledge_id=? AND `+visibleScopeSQL("task_id"), args...)
 	k, err := scanKnowledge(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -132,33 +138,35 @@ func (s *KnowledgeStore) Get(ctx context.Context, id string) (model.Knowledge, e
 
 // Review moves proposed -> reviewed (RFC-1300 §4). Anyone with access may
 // review; promoting to verified/rejected is not possible here by design.
-func (s *KnowledgeStore) Review(ctx context.Context, id string) (model.Knowledge, error) {
+func (s *KnowledgeStore) Review(ctx context.Context, reviewer, id string) (model.Knowledge, error) {
 	res, err := s.db.ExecContext(ctx, `UPDATE knowledge SET status=? WHERE knowledge_id=? AND status=?`,
 		model.KnowledgeReviewed, id, model.KnowledgeProposed)
 	if err != nil {
 		return model.Knowledge{}, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		existing, gerr := s.Get(ctx, id)
+		existing, gerr := s.Get(ctx, reviewer, id)
 		if gerr != nil {
 			return model.Knowledge{}, gerr
 		}
 		return model.Knowledge{}, model.Conflict("only a proposed entry can be reviewed").
 			WithDetails(map[string]string{"status": existing.Status})
 	}
-	return s.Get(ctx, id)
+	return s.Get(ctx, reviewer, id)
 }
 
 // Search implements RFC-1300 §8. Archived and rejected records are excluded
 // unless explicitly requested.
-func (s *KnowledgeStore) Search(ctx context.Context, filter model.KnowledgeFilter) ([]model.Knowledge, string, error) {
+func (s *KnowledgeStore) Search(ctx context.Context, viewer string, filter model.KnowledgeFilter) ([]model.Knowledge, string, error) {
 	limit := filter.Limit
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
 
-	var where []string
-	var args []any
+	// Closed-project records never reach a non-member, whatever else the
+	// filter asks for (RFC-1250 §11).
+	where := []string{visibleScopeSQL("task_id")}
+	args := visibleScopeArgs(viewer, true)
 
 	if filter.Category != "" {
 		where = append(where, "category = ?")

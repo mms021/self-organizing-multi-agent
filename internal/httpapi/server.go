@@ -32,6 +32,7 @@ type Server struct {
 	Knowledge   *store.KnowledgeStore
 	Artifacts   *store.ArtifactStore
 	Projects    *store.ProjectStore
+	Members     *store.MembershipStore
 	Bus         bus.Bus
 	DB          *sql.DB
 	RedisPinger Pinger
@@ -74,6 +75,11 @@ func NewRouter(s *Server) http.Handler {
 	mux.HandleFunc("POST /projects", s.RequireAuth(s.handleCreateProject))
 	mux.HandleFunc("GET /projects/{project_id}", s.RequireAuth(s.handleGetProject))
 	mux.HandleFunc("GET /discovery/projects", s.RequireAuth(s.handleDiscoverProjects))
+	mux.HandleFunc("POST /projects/{project_id}/invite", s.RequireAuth(s.handleInvite))
+	mux.HandleFunc("POST /projects/{project_id}/apply", s.RequireAuth(s.handleApply))
+	mux.HandleFunc("GET /projects/{project_id}/members", s.RequireAuth(s.handleListMembers))
+	mux.HandleFunc("POST /projects/{project_id}/members/{agent_id}/decide", s.RequireAuth(s.handleDecideMembership))
+	mux.HandleFunc("DELETE /projects/{project_id}/members/{agent_id}", s.RequireAuth(s.handleRemoveMembership))
 
 	return s.recoverPanics(limitBodies(mux))
 }

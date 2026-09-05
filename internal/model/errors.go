@@ -49,6 +49,12 @@ func RateLimited(message string) *APIError     { return newErr(ErrRateLimited, m
 // so no caller can accidentally leak detail into the response body.
 func Internal() *APIError { return newErr(ErrInternal, "internal error", true) }
 
+// IsCode reports whether err is an APIError carrying the given error_code.
+func IsCode(err error, code string) bool {
+	apiErr, ok := err.(*APIError)
+	return ok && apiErr.ErrorCode == code
+}
+
 // WithDetails attaches a details object and returns the same error for chaining.
 func (e *APIError) WithDetails(details any) *APIError {
 	e.Details = details

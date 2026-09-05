@@ -33,6 +33,7 @@ func newPlatform(t *testing.T) *httptest.Server {
 		Knowledge:   store.NewKnowledgeStore(sqlDB),
 		Artifacts:   store.NewArtifactStore(sqlDB),
 		Projects:    store.NewProjectStore(sqlDB),
+		Members:     store.NewMembershipStore(sqlDB),
 		Bus:         bus.NewFake(),
 		DB:          sqlDB,
 	}))
