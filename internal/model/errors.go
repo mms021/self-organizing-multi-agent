@@ -16,6 +16,11 @@ const (
 	ErrValidationError = "validation_error"
 	ErrRateLimited     = "rate_limited"
 	ErrConflict        = "conflict"
+	// ErrInternal covers failures that are the platform's own fault. Its
+	// message is deliberately fixed and uninformative: internal detail (SQL
+	// text, file paths) must not cross the trust boundary (RFC-1600 §2). The
+	// detail belongs in the server log, correlated by trace_id.
+	ErrInternal = "internal"
 )
 
 // APIError is the RFC-1000 §8 error body.
@@ -35,10 +40,14 @@ func newErr(code, message string, retryable bool) *APIError {
 }
 
 func NotFound(message string) *APIError        { return newErr(ErrNotFound, message, false) }
-func AccessDenied(message string) *APIError     { return newErr(ErrAccessDenied, message, false) }
-func ValidationError(message string) *APIError  { return newErr(ErrValidationError, message, false) }
-func Conflict(message string) *APIError         { return newErr(ErrConflict, message, false) }
-func RateLimited(message string) *APIError      { return newErr(ErrRateLimited, message, true) }
+func AccessDenied(message string) *APIError    { return newErr(ErrAccessDenied, message, false) }
+func ValidationError(message string) *APIError { return newErr(ErrValidationError, message, false) }
+func Conflict(message string) *APIError        { return newErr(ErrConflict, message, false) }
+func RateLimited(message string) *APIError     { return newErr(ErrRateLimited, message, true) }
+
+// Internal is the only way to build an internal error: it takes no message,
+// so no caller can accidentally leak detail into the response body.
+func Internal() *APIError { return newErr(ErrInternal, "internal error", true) }
 
 // WithDetails attaches a details object and returns the same error for chaining.
 func (e *APIError) WithDetails(details any) *APIError {
@@ -65,7 +74,11 @@ func HTTPStatus(code string) int {
 		return http.StatusTooManyRequests
 	case ErrConflict:
 		return http.StatusConflict
+	case ErrInternal:
+		return http.StatusInternalServerError
 	default:
+		// An unrecognised code is itself a bug: report it as a server fault
+		// rather than guessing a 4xx the client could act on.
 		return http.StatusInternalServerError
 	}
 }

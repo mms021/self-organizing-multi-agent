@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "embed"
@@ -182,13 +183,19 @@ func (c *Client) CreateProject(ctx context.Context, req model.CreateProjectReque
 // the same message is never returned twice. waitSeconds > 0 turns this into a
 // long-poll (the server wakes it via Redis pub/sub the moment something
 // arrives) — 0 returns immediately with whatever is already stored.
-func (c *Client) Inbox(ctx context.Context, waitSeconds int) ([]model.Envelope, error) {
+//
+// Passing types restricts delivery to the message types the caller acts on,
+// so an agent is not woken by traffic it would only discard (RFC-1100 §15).
+func (c *Client) Inbox(ctx context.Context, waitSeconds int, types ...string) ([]model.Envelope, error) {
 	q := url.Values{}
 	if c.cursor != "" {
 		q.Set("cursor", c.cursor)
 	}
 	if waitSeconds > 0 {
 		q.Set("wait_seconds", strconv.Itoa(waitSeconds))
+	}
+	if len(types) > 0 {
+		q.Set("type", strings.Join(types, ","))
 	}
 	var out struct {
 		Messages   []model.Envelope `json:"messages"`

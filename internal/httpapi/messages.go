@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"aichatdeck/internal/bus"
@@ -70,6 +71,9 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 		Recipient: agentID,
 		TaskID:    q.Get("task_id"),
 		Cursor:    q.Get("cursor"),
+	}
+	if types := q.Get("type"); types != "" {
+		filter.Types = strings.Split(types, ",")
 	}
 	waitSeconds := 0
 	if v := q.Get("wait_seconds"); v != "" {

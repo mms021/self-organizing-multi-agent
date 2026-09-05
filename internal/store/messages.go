@@ -114,8 +114,12 @@ func (s *MessageStore) Get(ctx context.Context, messageID string) (model.Envelop
 type MessageFilter struct {
 	Recipient string // the authenticated agent — always required
 	TaskID    string
-	Cursor    string
-	Limit     int
+	// Types narrows delivery to the message types the caller actually acts
+	// on. Without it every agent drains every broadcast just to discard it,
+	// which is the noise RFC-1100 §15 asks agents to avoid.
+	Types  []string
+	Cursor string
+	Limit  int
 }
 
 // List returns messages addressed directly to filter.Recipient or to
@@ -132,6 +136,12 @@ func (s *MessageStore) List(ctx context.Context, filter MessageFilter, now time.
 	if filter.TaskID != "" {
 		where = append(where, "task_id = ?")
 		args = append(args, filter.TaskID)
+	}
+	if len(filter.Types) > 0 {
+		where = append(where, "type IN ("+strings.TrimSuffix(strings.Repeat("?,", len(filter.Types)), ",")+")")
+		for _, t := range filter.Types {
+			args = append(args, t)
+		}
 	}
 	if filter.Cursor != "" {
 		seq, ok := decodeSeqCursor(filter.Cursor)

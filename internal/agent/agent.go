@@ -23,9 +23,17 @@ type Agent struct {
 	// PollWait is how long an idle iteration long-polls the inbox before
 	// giving up and looking for tasks again.
 	PollWait int
+
+	// StatePath, when set, persists the issued credential so a restart
+	// resumes the same identity instead of registering a new agent.
+	StatePath string
 }
 
 // Bootstrap walks RFC-1400 §2: read the manifest, register, announce READY.
+//
+// When StatePath is set, a previously issued credential is reused so a
+// restarted process comes back as the same agent (RFC-1400 §7) instead of
+// abandoning the tasks and knowledge its previous incarnation owned.
 func (a *Agent) Bootstrap(ctx context.Context) error {
 	manifest, err := a.Client.Manifest(ctx)
 	if err != nil {
@@ -33,10 +41,27 @@ func (a *Agent) Bootstrap(ctx context.Context) error {
 	}
 	a.logf("manifest: protocol_version=%v platform=%v", manifest["protocol_version"], manifest["platform_id"])
 
+	resumed := false
+	if a.StatePath != "" {
+		state, ok, err := LoadState(a.StatePath)
+		if err != nil {
+			return err
+		}
+		if ok && state.BaseURL == a.Client.BaseURL {
+			a.Client.AgentID = state.AgentID
+			a.Client.Token = state.Token
+			resumed = true
+		} else if ok {
+			a.logf("stored state is for %s, not %s — registering fresh", state.BaseURL, a.Client.BaseURL)
+		}
+	}
+
 	caps := make([]model.Capability, 0, len(a.Caps))
 	for _, c := range a.Caps {
 		caps = append(caps, model.Capability{Name: c})
 	}
+	// With a token in hand this is the idempotent re-register path, which also
+	// refreshes the profile; without one it mints a new identity.
 	if err := a.Client.Register(ctx, model.RegisterRequest{
 		Capabilities: caps,
 		Skills:       a.Caps,
@@ -44,11 +69,25 @@ func (a *Agent) Bootstrap(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("register: %w", err)
 	}
-	a.logf("registered as %s", a.Client.AgentID)
+
+	if resumed {
+		a.logf("resumed as %s", a.Client.AgentID)
+	} else {
+		a.logf("registered as %s", a.Client.AgentID)
+	}
+	if a.StatePath != "" {
+		if err := SaveState(a.StatePath, State{
+			AgentID: a.Client.AgentID,
+			Token:   a.Client.Token,
+			BaseURL: a.Client.BaseURL,
+		}); err != nil {
+			return err
+		}
+	}
 
 	// The ZZ marker (prompt.md) confirms the agent is operating with the
 	// instructions loaded — visible to anyone reading the message log.
-	if err := a.sendStatus(ctx, "idle", "ZZ agent "+a.Name+" ready"); err != nil {
+	if err := a.broadcastStatus(ctx, "idle", "ZZ agent "+a.Name+" ready"); err != nil {
 		return fmt.Errorf("initial status: %w", err)
 	}
 	return nil
@@ -85,20 +124,20 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 }
 
-// handleInbox verifies RESULT messages for tasks this agent created. Other
-// message types are logged and left alone — nothing in this milestone
-// requires answering them.
+// handleInbox verifies RESULT messages for tasks this agent created. It asks
+// the server for RESULT only: draining every broadcast just to discard it is
+// exactly the noise RFC-1100 §15 tells agents to avoid, and it grows with the
+// number of agents.
 func (a *Agent) handleInbox(ctx context.Context, waitSeconds int) (bool, error) {
-	msgs, err := a.Client.Inbox(ctx, waitSeconds)
+	msgs, err := a.Client.Inbox(ctx, waitSeconds, "RESULT")
 	if err != nil {
 		return false, fmt.Errorf("inbox: %w", err)
 	}
 
 	acted := false
 	for _, msg := range msgs {
-		if msg.Type != "RESULT" || msg.TaskID == "" {
-			a.logf("inbox: %s from %s (ignored)", msg.Type, msg.Sender)
-			continue
+		if msg.TaskID == "" {
+			continue // a RESULT with no task is not actionable
 		}
 
 		task, err := a.Client.GetTask(ctx, msg.TaskID)
@@ -160,7 +199,9 @@ func (a *Agent) takeOneTask(ctx context.Context) (bool, error) {
 			return false, fmt.Errorf("claim %s: %w", task.TaskID, err)
 		}
 		a.logf("claimed %s: %s", claimed.TaskID, claimed.Objective)
-		_ = a.sendStatus(ctx, "working", "on "+claimed.TaskID)
+		// Progress goes to the one party that cares — the task's creator —
+		// rather than to every agent on the platform.
+		_ = a.sendStatus(ctx, claimed.CreatedBy, "working", "on "+claimed.TaskID)
 
 		// Look up what the group already knows before doing the work again
 		// (RFC-1300 §8). A failure here is not fatal — working without prior
@@ -183,7 +224,7 @@ func (a *Agent) takeOneTask(ctx context.Context) (bool, error) {
 		a.logf("reported %s: %s", claimed.TaskID, status)
 
 		a.publishLesson(ctx, claimed, summary, status)
-		_ = a.sendStatus(ctx, "idle", "done with "+claimed.TaskID)
+		_ = a.sendStatus(ctx, claimed.CreatedBy, "idle", "done with "+claimed.TaskID)
 		return true, nil
 	}
 	return false, nil
@@ -239,7 +280,14 @@ func (a *Agent) sendResult(ctx context.Context, task model.Task, summary, status
 	return err
 }
 
-func (a *Agent) sendStatus(ctx context.Context, state, detail string) error {
+// broadcastStatus announces presence to everyone. Reserved for things the
+// whole platform genuinely needs — an agent coming online — not routine
+// per-task transitions.
+func (a *Agent) broadcastStatus(ctx context.Context, state, detail string) error {
+	return a.sendStatus(ctx, model.BroadcastRecipient, state, detail)
+}
+
+func (a *Agent) sendStatus(ctx context.Context, recipient, state, detail string) error {
 	payload, err := json.Marshal(model.StatusPayload{
 		Subject:   "agent",
 		SubjectID: a.Client.AgentID,
@@ -254,7 +302,7 @@ func (a *Agent) sendStatus(ctx context.Context, state, detail string) error {
 		ProtocolVersion: "1.0",
 		Type:            "STATUS",
 		Sender:          a.Client.AgentID,
-		Recipient:       model.BroadcastRecipient,
+		Recipient:       recipient,
 		Timestamp:       time.Now().UTC(),
 		Priority:        "low",
 		Payload:         payload,

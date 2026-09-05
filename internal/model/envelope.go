@@ -80,6 +80,16 @@ func (e *Envelope) Validate() *APIError {
 	if e.TTL != nil && *e.TTL < 0 {
 		return ValidationError("ttl must not be negative")
 	}
+	for field, v := range map[string]string{"message_id": e.MessageID, "sender": e.Sender, "recipient": e.Recipient} {
+		if err := checkText(field, v, MaxShortField); err != nil {
+			return err
+		}
+	}
+	// One bound for every payload shape: the per-type checks below only see
+	// the fields they know about, and payload is free-form JSON.
+	if len(e.Payload) > MaxObjectSize {
+		return ValidationError(fmt.Sprintf("payload must be at most %d bytes of JSON", MaxObjectSize))
+	}
 	return ValidatePayload(e.Type, e.Payload)
 }
 
@@ -170,6 +180,10 @@ func ValidatePayload(msgType string, raw json.RawMessage) *APIError {
 		}
 		if p.Summary == "" {
 			return ValidationError("summary is required")
+		}
+		// A RESULT summary is read into the creating agent's Verify prompt.
+		if err := checkText("summary", p.Summary, MaxTextField); err != nil {
+			return err
 		}
 		if p.Status != "success" && p.Status != "partial" && p.Status != "failure" {
 			return ValidationError("status must be success, partial or failure")

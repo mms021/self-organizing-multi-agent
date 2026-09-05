@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"runtime/debug"
 	"strings"
+	"time"
 
 	"aichatdeck/internal/bus"
 	"aichatdeck/internal/idgen"
@@ -35,16 +36,23 @@ type Server struct {
 	DB          *sql.DB
 	RedisPinger Pinger
 	Logger      *log.Logger // nil silences server-side logging (tests)
+
+	// Rate-limit state, per router (see NewRouter).
+	registerLimit *limiter
+	agentLimit    *limiter
 }
 
 func NewRouter(s *Server) http.Handler {
+	s.registerLimit = newLimiter(registerPerMinute, time.Minute)
+	s.agentLimit = newLimiter(agentPerMinute, time.Minute)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /manifest", s.handleManifest)
 	mux.HandleFunc("GET /discovery", s.handleDiscovery)
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /donate", s.handleDonate)
 
-	mux.HandleFunc("POST /agents/register", s.handleRegister)
+	mux.HandleFunc("POST /agents/register", s.rateLimit(s.registerLimit, clientIP, s.handleRegister))
 	mux.HandleFunc("GET /agents/{agent_id}", s.RequireAuth(s.handleGetAgent))
 
 	mux.HandleFunc("POST /messages", s.RequireAuth(s.handlePostMessage))
@@ -67,7 +75,20 @@ func NewRouter(s *Server) http.Handler {
 	mux.HandleFunc("GET /projects/{project_id}", s.RequireAuth(s.handleGetProject))
 	mux.HandleFunc("GET /discovery/projects", s.RequireAuth(s.handleDiscoverProjects))
 
-	return s.recoverPanics(mux)
+	return s.recoverPanics(limitBodies(mux))
+}
+
+// maxBodyBytes caps every request body. Nothing downstream streams: each
+// handler decodes the whole body into memory, and POST /agents/register is
+// reachable without a credential — so without a cap one request can make the
+// server allocate until it dies.
+const maxBodyBytes = 1 << 20 // 1 MiB
+
+func limitBodies(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // recoverPanics keeps one bad request from tearing down the handler with no
@@ -78,11 +99,7 @@ func (s *Server) recoverPanics(next http.Handler) http.Handler {
 			if rec := recover(); rec != nil {
 				traceID := idgen.New("trace")
 				s.logf("panic [%s] %s %s: %v\n%s", traceID, r.Method, r.URL.Path, rec, debug.Stack())
-				model.WriteError(w, traceID, &model.APIError{
-					ErrorCode: "internal",
-					Message:   "internal error",
-					Retryable: true,
-				})
+				model.WriteError(w, traceID, model.Internal())
 			}
 		}()
 		next.ServeHTTP(w, r)
@@ -137,11 +154,7 @@ func (s *Server) writeErr(w http.ResponseWriter, err error) {
 		return
 	}
 	s.logf("internal error [%s]: %v", traceID, err)
-	model.WriteError(w, traceID, &model.APIError{
-		ErrorCode: "internal",
-		Message:   "internal error",
-		Retryable: true,
-	})
+	model.WriteError(w, traceID, model.Internal())
 }
 
 func (s *Server) logf(format string, args ...any) {
@@ -158,6 +171,12 @@ func decodeJSON(r *http.Request, dst any) *model.APIError {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
+		// A body over the cap (limitBodies) is a client mistake with a fixed
+		// message: the reader's own error text says nothing useful.
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return model.ValidationError("request body too large")
+		}
 		return model.ValidationError("invalid JSON body: " + err.Error())
 	}
 	return nil

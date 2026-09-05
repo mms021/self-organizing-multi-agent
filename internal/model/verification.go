@@ -19,7 +19,13 @@ func (r *VerifyRequest) Validate() *APIError {
 	default:
 		return ValidationError("verdict must be verified, rejected or inconclusive")
 	}
-	return nil
+	if err := checkText("target_message_id", r.TargetMessageID, MaxShortField); err != nil {
+		return err
+	}
+	if err := checkText("rationale", r.Rationale, MaxTextField); err != nil {
+		return err
+	}
+	return checkList("evidence", r.Evidence, MaxListItems, MaxShortField)
 }
 
 // Verification is the RFC-1800 persisted Verification shape.

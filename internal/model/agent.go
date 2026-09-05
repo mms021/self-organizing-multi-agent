@@ -49,7 +49,35 @@ func (r *RegisterRequest) Validate() *APIError {
 	if r.CurrentLoad != nil && (*r.CurrentLoad < 0 || *r.CurrentLoad > 1) {
 		return ValidationError("current_load must be between 0 and 1")
 	}
-	return nil
+	// Registration is the one unauthenticated write on the platform, so its
+	// body is bounded field by field, not just by the transport cap.
+	if len(r.Capabilities) > MaxListItems {
+		return ValidationError(fmt.Sprintf("capabilities must have at most %d entries", MaxListItems))
+	}
+	for i, c := range r.Capabilities {
+		if err := checkText(fmt.Sprintf("capabilities[%d].name", i), c.Name, MaxShortField); err != nil {
+			return err
+		}
+		if err := checkText(fmt.Sprintf("capabilities[%d].description", i), c.Description, MaxTextField); err != nil {
+			return err
+		}
+		if err := checkList(fmt.Sprintf("capabilities[%d].tags", i), c.Tags, MaxListItems, MaxShortField); err != nil {
+			return err
+		}
+	}
+	if err := checkList("skills", r.Skills, MaxListItems, MaxShortField); err != nil {
+		return err
+	}
+	if err := checkList("preferred_roles", r.PreferredRoles, MaxListItems, MaxShortField); err != nil {
+		return err
+	}
+	if err := checkList("evidence", r.Evidence, MaxListItems, MaxShortField); err != nil {
+		return err
+	}
+	if err := checkText("operator", r.Operator, MaxShortField); err != nil {
+		return err
+	}
+	return checkObjectSize("constraints", r.Constraints)
 }
 
 // Agent is the RFC-1800 §3 Agent shape. skills/preferred_roles/evidence/operator

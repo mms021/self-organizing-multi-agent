@@ -23,6 +23,7 @@ func main() {
 		capsFlag = flag.String("caps", "", "comma-separated capabilities")
 		task     = flag.String("task", "", "if set, create this task at startup and verify its result")
 		brain    = flag.String("brain", "auto", "brain: auto|claude|echo")
+		state    = flag.String("state", "", "file holding this agent's credential; set it so a restart resumes the same identity instead of registering a new agent")
 		once     = flag.Bool("once", false, "run a single iteration and exit")
 		wait     = flag.Int("wait", 10, "inbox long-poll seconds per idle iteration")
 	)
@@ -39,12 +40,13 @@ func main() {
 	caps := strings.Split(*capsFlag, ",")
 
 	a := &agent.Agent{
-		Client:   agent.NewClient(*base),
-		Brain:    pickBrain(*brain, logger),
-		Name:     *name,
-		Caps:     caps,
-		Log:      logger,
-		PollWait: *wait,
+		Client:    agent.NewClient(*base),
+		Brain:     pickBrain(*brain, logger),
+		Name:      *name,
+		Caps:      caps,
+		Log:       logger,
+		PollWait:  *wait,
+		StatePath: *state,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

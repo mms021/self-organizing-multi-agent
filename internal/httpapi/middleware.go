@@ -25,6 +25,12 @@ func (s *Server) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 			s.writeErr(w, model.AccessDenied("invalid or revoked credential"))
 			return
 		}
+		// Beyond identity, a credential also buys a budget: one agent must not
+		// be able to saturate the platform for everyone else.
+		if !s.agentLimit.allow(agentID) {
+			s.writeErr(w, model.RateLimited("rate limit exceeded, retry later"))
+			return
+		}
 		next(w, r.WithContext(withAgentID(r.Context(), agentID)))
 	}
 }

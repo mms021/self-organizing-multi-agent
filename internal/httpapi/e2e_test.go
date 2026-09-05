@@ -177,7 +177,7 @@ func TestCoreLoop(t *testing.T) {
 	// --- verify ---
 	status, verifyOut := a.do(http.MethodPost, "/tasks/"+taskID+"/verify", map[string]any{
 		"target_message_id": "msg-result-1",
-		"verdict":            "verified",
+		"verdict":           "verified",
 	})
 	if status != http.StatusOK {
 		t.Fatalf("verify: expected 200, got %d: %v", status, verifyOut)

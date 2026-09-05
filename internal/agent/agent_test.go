@@ -199,6 +199,117 @@ func TestBootstrapAnnouncesZZMarker(t *testing.T) {
 	t.Fatalf("no broadcast STATUS carrying the ZZ marker; got %d messages", len(msgs))
 }
 
+// A restarted process must come back as the same agent. Without persisting
+// the credential it registers anew and abandons everything the previous
+// incarnation owned — its tasks become unverifiable, since only their creator
+// may verify them.
+func TestAgentIdentitySurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	platform := newPlatform(t)
+	statePath := filepath.Join(t.TempDir(), "agent.json")
+
+	boot := func() *agent.Agent {
+		a := &agent.Agent{
+			Client:    agent.NewClient(platform.URL),
+			Brain:     agent.EchoBrain{},
+			Name:      "persistent",
+			Caps:      []string{"testing"},
+			Log:       log.New(io.Discard, "", 0),
+			StatePath: statePath,
+		}
+		if err := a.Bootstrap(ctx); err != nil {
+			t.Fatalf("bootstrap: %v", err)
+		}
+		return a
+	}
+
+	first := boot()
+	firstID := first.Client.AgentID
+
+	// A second process, same state file: same identity, same credential.
+	second := boot()
+	if second.Client.AgentID != firstID {
+		t.Fatalf("restart produced a new identity: %s -> %s", firstID, second.Client.AgentID)
+	}
+
+	// And it can still act on what the first one created.
+	task, err := second.Client.CreateTask(ctx, model.CreateTaskRequest{Objective: "survive a restart"})
+	if err != nil {
+		t.Fatalf("create task after restart: %v", err)
+	}
+	if task.CreatedBy != firstID {
+		t.Errorf("task attributed to %s, expected %s", task.CreatedBy, firstID)
+	}
+
+	// A different state file is a different agent.
+	other := &agent.Agent{
+		Client:    agent.NewClient(platform.URL),
+		Brain:     agent.EchoBrain{},
+		Name:      "other",
+		Caps:      []string{"testing"},
+		Log:       log.New(io.Discard, "", 0),
+		StatePath: filepath.Join(t.TempDir(), "other.json"),
+	}
+	if err := other.Bootstrap(ctx); err != nil {
+		t.Fatalf("bootstrap other: %v", err)
+	}
+	if other.Client.AgentID == firstID {
+		t.Error("a separate state file must not resume someone else's identity")
+	}
+}
+
+// Routine per-task progress must not go to everyone: only presence does.
+// Broadcasting every transition makes each agent read N times the traffic it
+// can act on (RFC-1100 §15).
+func TestProgressStatusIsNotBroadcast(t *testing.T) {
+	ctx := context.Background()
+	platform := newPlatform(t)
+
+	creator := newAgent(t, platform.URL, "creator")
+	worker := newAgent(t, platform.URL, "worker")
+	bystander := newAgent(t, platform.URL, "bystander")
+
+	if _, err := creator.Client.CreateTask(ctx, model.CreateTaskRequest{Objective: "quiet work"}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := worker.RunOnce(ctx, 0); err != nil {
+		t.Fatalf("worker iteration: %v", err)
+	}
+
+	msgs, err := bystander.Client.Inbox(ctx, 0)
+	if err != nil {
+		t.Fatalf("inbox: %v", err)
+	}
+	for _, m := range msgs {
+		if m.Type == "STATUS" && strings.Contains(string(m.Payload), "quiet work") {
+			t.Fatal("task progress reached an uninvolved agent")
+		}
+		if m.Type == "RESULT" {
+			t.Fatal("a RESULT for someone else's task reached an uninvolved agent")
+		}
+	}
+}
+
+// The inbox must be filterable, so an agent is not woken by traffic it would
+// only discard.
+func TestInboxFiltersByType(t *testing.T) {
+	ctx := context.Background()
+	platform := newPlatform(t)
+
+	watcher := newAgent(t, platform.URL, "watcher")
+	newAgent(t, platform.URL, "noisy") // broadcasts its presence STATUS
+
+	msgs, err := watcher.Client.Inbox(ctx, 0, "RESULT")
+	if err != nil {
+		t.Fatalf("inbox: %v", err)
+	}
+	for _, m := range msgs {
+		if m.Type != "RESULT" {
+			t.Fatalf("type filter leaked a %s message", m.Type)
+		}
+	}
+}
+
 // prompt.md is embedded into the binary and handed to the model as its system
 // prompt — if it ever ships empty, agents run with no instructions at all.
 func TestSystemPromptEmbedded(t *testing.T) {

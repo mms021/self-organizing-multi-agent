@@ -37,7 +37,21 @@ func (r *CreateTaskRequest) Validate() *APIError {
 	if r.ProjectID != nil {
 		return ValidationError("project_id is not supported yet (RFC-1250 out of scope this milestone)")
 	}
-	return nil
+	// Everything below crosses into other agents' prompts (internal/agent
+	// brain.go), so it is bounded here rather than at the point of use.
+	if err := checkText("objective", r.Objective, MaxTextField); err != nil {
+		return err
+	}
+	if err := checkList("constraints", r.Constraints, MaxListItems, MaxTextField); err != nil {
+		return err
+	}
+	if err := checkList("success_criteria", r.SuccessCriteria, MaxListItems, MaxTextField); err != nil {
+		return err
+	}
+	if err := checkList("required_capabilities", r.RequiredCapabilities, MaxListItems, MaxShortField); err != nil {
+		return err
+	}
+	return checkObjectSize("context", r.Context)
 }
 
 // Task is the RFC-1800 Task shape.

@@ -98,8 +98,22 @@ func (r *CreateKnowledgeRequest) Validate() *APIError {
 		if ref.ID == "" {
 			return ValidationError("references[" + strconv.Itoa(i) + "].id is required")
 		}
+		if err := checkText("references["+strconv.Itoa(i)+"].id", ref.ID, MaxShortField); err != nil {
+			return err
+		}
 	}
-	return nil
+	if len(r.References) > MaxListItems {
+		return ValidationError("references must have at most " + strconv.Itoa(MaxListItems) + " entries")
+	}
+	// Shared memory is read straight into other agents' prompts (RFC-1300 §8),
+	// so an entry is bounded like any other untrusted prompt input.
+	if err := checkList("tags", r.Tags, MaxListItems, MaxShortField); err != nil {
+		return err
+	}
+	if err := checkText("source", r.Source, MaxShortField); err != nil {
+		return err
+	}
+	return checkObjectSize("content", r.Content)
 }
 
 // ReviewKnowledgeRequest is the POST /memory/entries/{id}/review body. Only

@@ -69,19 +69,55 @@ func TestInternalErrorsDoNotLeakDetail(t *testing.T) {
 	}
 }
 
-// Unauthenticated access to a protected endpoint is access_denied, not a 500
-// and not a silent pass-through.
+// Every route that acts on behalf of an agent must be behind RequireAuth.
+// Without it a handler would read an empty agent_id from the context and
+// silently create records owned by nobody, so this enumerates the whole
+// protected surface rather than a sample.
 func TestProtectedEndpointsRequireCredential(t *testing.T) {
 	srv := newTestServer(t)
 	anon := &client{t: t, base: srv.URL}
 
-	for _, path := range []string{"/tasks", "/messages", "/memory/search", "/discovery/projects"} {
-		status, body := anon.do(http.MethodGet, path, nil)
+	protected := []struct{ method, path string }{
+		{http.MethodGet, "/agents/agent-x"},
+		{http.MethodGet, "/tasks"},
+		{http.MethodPost, "/tasks"},
+		{http.MethodGet, "/tasks/task-x"},
+		{http.MethodPost, "/tasks/task-x/claim"},
+		{http.MethodPost, "/tasks/task-x/verify"},
+		{http.MethodGet, "/messages"},
+		{http.MethodPost, "/messages"},
+		{http.MethodGet, "/memory/search"},
+		{http.MethodPost, "/memory/entries"},
+		{http.MethodGet, "/memory/entries/knowledge-x"},
+		{http.MethodPost, "/memory/entries/knowledge-x/review"},
+		{http.MethodPost, "/artifacts"},
+		{http.MethodGet, "/artifacts/artifact-x"},
+		{http.MethodPost, "/projects"},
+		{http.MethodGet, "/projects/project-x"},
+		{http.MethodGet, "/discovery/projects"},
+	}
+	for _, ep := range protected {
+		status, body := anon.do(ep.method, ep.path, nil)
 		if status != http.StatusForbidden {
-			t.Errorf("%s without a credential: expected 403, got %d", path, status)
+			t.Errorf("%s %s without a credential: expected 403, got %d", ep.method, ep.path, status)
+			continue
 		}
 		if code, _ := body["error_code"].(string); code != "access_denied" {
-			t.Errorf("%s: expected access_denied, got %q", path, code)
+			t.Errorf("%s %s: expected access_denied, got %q", ep.method, ep.path, code)
+		}
+	}
+}
+
+// The public surface must stay reachable without a credential — an agent has
+// to read the manifest before it can register (RFC-1400 §2).
+func TestPublicEndpointsNeedNoCredential(t *testing.T) {
+	srv := newTestServer(t)
+	anon := &client{t: t, base: srv.URL}
+
+	for _, path := range []string{"/manifest", "/discovery", "/health", "/donate"} {
+		status, _ := anon.do(http.MethodGet, path, nil)
+		if status != http.StatusOK {
+			t.Errorf("%s: expected 200 without a credential, got %d", path, status)
 		}
 	}
 }
@@ -133,5 +169,58 @@ func TestSenderSpoofingRefused(t *testing.T) {
 	})
 	if status != http.StatusForbidden {
 		t.Fatalf("expected 403 for a spoofed sender, got %d: %v", status, body)
+	}
+}
+
+// Oversized input must be rejected as a validation error, at the transport cap
+// and at the field caps — an agent cannot make the server (or another agent's
+// prompt) swallow an arbitrary amount of text.
+func TestOversizedInputIsRejected(t *testing.T) {
+	srv := newTestServer(t)
+	c := register(t, srv.URL)
+
+	cases := []struct {
+		name, path string
+		body       any
+	}{
+		{"body over the transport cap", "/tasks", map[string]any{"objective": strings.Repeat("a", 2<<20)}},
+		{"objective over the field cap", "/tasks", map[string]any{"objective": strings.Repeat("a", 5000)}},
+		{"too many success criteria", "/tasks", map[string]any{
+			"objective": "x", "success_criteria": make([]string, 100)}},
+	}
+	for _, tc := range cases {
+		status, body := c.do(http.MethodPost, tc.path, tc.body)
+		if status != http.StatusBadRequest {
+			t.Errorf("%s: expected 400, got %d: %v", tc.name, status, body)
+			continue
+		}
+		if code, _ := body["error_code"].(string); code != "validation_error" {
+			t.Errorf("%s: expected validation_error, got %q", tc.name, code)
+		}
+	}
+}
+
+// Registration is the only unauthenticated write: unbounded it is a faucet for
+// agents and credentials, so it is rate limited per client IP.
+func TestRegistrationIsRateLimited(t *testing.T) {
+	srv := newTestServer(t)
+	anon := &client{t: t, base: srv.URL}
+
+	limited := false
+	for i := 0; i < 40 && !limited; i++ {
+		status, body := anon.do(http.MethodPost, "/agents/register", registerBody())
+		switch status {
+		case http.StatusCreated:
+		case http.StatusTooManyRequests:
+			if code, _ := body["error_code"].(string); code != "rate_limited" {
+				t.Fatalf("expected rate_limited, got %q", code)
+			}
+			limited = true
+		default:
+			t.Fatalf("register #%d: unexpected status %d: %v", i, status, body)
+		}
+	}
+	if !limited {
+		t.Error("registration accepted 40 requests in a burst without limiting")
 	}
 }
