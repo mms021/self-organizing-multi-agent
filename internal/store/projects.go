@@ -14,7 +14,7 @@ type ProjectStore struct{ db *sql.DB }
 
 func NewProjectStore(db *sql.DB) *ProjectStore { return &ProjectStore{db: db} }
 
-const projectColumns = `project_id, schema_version, name, objective, visibility, listed, membership_policy, owner, status, created_at, metadata`
+const projectColumns = `project_id, schema_version, name, objective, visibility, listed, membership_policy, owner, pending_owner, status, created_at, metadata`
 
 func (s *ProjectStore) Create(ctx context.Context, owner string, req model.CreateProjectRequest) (model.Project, error) {
 	id := idgen.New("project")
@@ -42,8 +42,8 @@ func (s *ProjectStore) Create(ctx context.Context, owner string, req model.Creat
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO projects (`+projectColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		id, "1.0", req.Name, req.Objective, visibility, boolToInt(listed), policy, owner, model.ProjectActive, now, "{}",
+		INSERT INTO projects (`+projectColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		id, "1.0", req.Name, req.Objective, visibility, boolToInt(listed), policy, owner, nil, model.ProjectActive, now, "{}",
 	); err != nil {
 		return model.Project{}, err
 	}
@@ -72,10 +72,14 @@ func scanProject(row interface{ Scan(...any) error }) (model.Project, error) {
 	var p model.Project
 	var listed int
 	var metadataJSON, createdAtStr string
+	var pendingOwner sql.NullString
 	err := row.Scan(&p.ProjectID, &p.SchemaVersion, &p.Name, &p.Objective, &p.Visibility,
-		&listed, &p.MembershipPolicy, &p.Owner, &p.Status, &createdAtStr, &metadataJSON)
+		&listed, &p.MembershipPolicy, &p.Owner, &pendingOwner, &p.Status, &createdAtStr, &metadataJSON)
 	if err != nil {
 		return model.Project{}, err
+	}
+	if pendingOwner.Valid {
+		p.PendingOwner = &pendingOwner.String
 	}
 	p.Listed = listed != 0
 	p.Metadata = fromJSON[map[string]any](metadataJSON)
@@ -121,10 +125,13 @@ func (s *ProjectStore) List(ctx context.Context, agentID string) ([]model.Projec
 		var p model.Project
 		var listed int
 		var metadataJSON, createdAtStr string
-		var myStatus sql.NullString
+		var myStatus, pendingOwner sql.NullString
 		if err := rows.Scan(&p.ProjectID, &p.SchemaVersion, &p.Name, &p.Objective, &p.Visibility,
-			&listed, &p.MembershipPolicy, &p.Owner, &p.Status, &createdAtStr, &metadataJSON, &myStatus); err != nil {
+			&listed, &p.MembershipPolicy, &p.Owner, &pendingOwner, &p.Status, &createdAtStr, &metadataJSON, &myStatus); err != nil {
 			return nil, err
+		}
+		if pendingOwner.Valid {
+			p.PendingOwner = &pendingOwner.String
 		}
 		p.Listed = listed != 0
 		p.Metadata = fromJSON[map[string]any](metadataJSON)
@@ -146,4 +153,99 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// Nominate records a pending transfer of ownership. Nothing changes yet: the
+// nominee must accept (RFC-1250 §9). Re-nominating replaces any outstanding
+// nomination, since a project has one owner and therefore one successor.
+func (s *ProjectStore) Nominate(ctx context.Context, projectID, newOwner string) (model.Project, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE projects SET pending_owner=?, pending_owner_at=? WHERE project_id=? AND status=?`,
+		newOwner, time.Now().UTC().Format(time.RFC3339), projectID, model.ProjectActive)
+	if err != nil {
+		return model.Project{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return model.Project{}, model.Conflict("an archived project cannot change hands")
+	}
+	return s.Get(ctx, projectID)
+}
+
+// AcceptTransfer completes a nomination: the nominee becomes owner and the
+// previous owner stays on as an ordinary active member. Losing ownership is
+// not the same as leaving.
+func (s *ProjectStore) AcceptTransfer(ctx context.Context, projectID, newOwner string) (model.Project, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Project{}, err
+	}
+	defer tx.Rollback()
+
+	var currentOwner, visibility string
+	var pending sql.NullString
+	err = tx.QueryRowContext(ctx,
+		`SELECT owner, pending_owner, visibility FROM projects WHERE project_id=?`, projectID).
+		Scan(&currentOwner, &pending, &visibility)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Project{}, model.NotFound("project not found")
+	}
+	if err != nil {
+		return model.Project{}, err
+	}
+	if !pending.Valid || pending.String != newOwner {
+		return model.Project{}, model.Conflict("no transfer is pending for this agent")
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE projects SET owner=?, pending_owner=NULL, pending_owner_at=NULL WHERE project_id=?`,
+		newOwner, projectID); err != nil {
+		return model.Project{}, err
+	}
+	// The outgoing owner keeps their seat; only the title moves.
+	if visibility == model.ProjectClosed {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO project_members (project_id, agent_id, status, role, invited_by, joined_at, scope, expires_at, created_at)
+			VALUES (?,?,?,?,?,?,?,?,?)
+			ON CONFLICT(project_id, agent_id) DO UPDATE SET status=excluded.status`,
+			projectID, currentOwner, model.MemberActive, model.RoleMember, nil,
+			time.Now().UTC().Format(time.RFC3339), nil, nil, time.Now().UTC().Format(time.RFC3339),
+		); err != nil {
+			return model.Project{}, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return model.Project{}, err
+	}
+	return s.Get(ctx, projectID)
+}
+
+// CancelTransfer withdraws or declines a pending nomination.
+func (s *ProjectStore) CancelTransfer(ctx context.Context, projectID string) (model.Project, error) {
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE projects SET pending_owner=NULL, pending_owner_at=NULL WHERE project_id=?`, projectID); err != nil {
+		return model.Project{}, err
+	}
+	return s.Get(ctx, projectID)
+}
+
+// Succeed hands the project to successor, or archives it when there is none.
+// RFC-1250 §9 forbids an ownerless project, so a departing owner must leave
+// one of these two states behind — never a project with nobody responsible
+// for it.
+func (s *ProjectStore) Succeed(ctx context.Context, projectID, successor string) (model.Project, error) {
+	if successor == "" {
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE projects SET status=?, pending_owner=NULL, pending_owner_at=NULL WHERE project_id=?`,
+			model.ProjectArchived, projectID); err != nil {
+			return model.Project{}, err
+		}
+		return s.Get(ctx, projectID)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE projects SET owner=?, pending_owner=NULL, pending_owner_at=NULL WHERE project_id=?`,
+		successor, projectID); err != nil {
+		return model.Project{}, err
+	}
+	return s.Get(ctx, projectID)
 }

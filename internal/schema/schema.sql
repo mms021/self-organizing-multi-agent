@@ -68,11 +68,10 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_inbox ON messages(recipient, seq);
 CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id);
 
--- Projects (RFC-1250). Only `open` visibility is implemented: records are
--- grouped by project but visible to everyone, which is exactly RFC-1250 §11's
--- open-project rule. `closed` needs membership enforcement (§5-§8) and is
--- rejected at the API until that lands, rather than offering isolation that
--- does not actually isolate.
+-- Projects (RFC-1250). `open` groups records that stay visible to everyone
+-- (§11); `closed` restricts them to members (§5-§8). A project always has
+-- exactly one owner (§9): ownership moves only by an accepted transfer, or by
+-- succession when the owner departs.
 CREATE TABLE IF NOT EXISTS projects (
   project_id TEXT PRIMARY KEY,
   schema_version TEXT NOT NULL DEFAULT '1.0',
@@ -83,6 +82,12 @@ CREATE TABLE IF NOT EXISTS projects (
   membership_policy TEXT NOT NULL DEFAULT 'invite_only',
   owner TEXT NOT NULL REFERENCES agents(agent_id),
   status TEXT NOT NULL DEFAULT 'active',
+  -- A transfer of ownership is bilateral: the current owner nominates, the
+  -- nominee accepts (RFC-1250 §9, and the counterparty-as-approver case in
+  -- RFC-1600 §8). Only one nomination can be outstanding — a project has
+  -- exactly one owner, so a queue of them would be meaningless.
+  pending_owner TEXT REFERENCES agents(agent_id),
+  pending_owner_at TEXT,
   created_at TEXT NOT NULL,
   metadata TEXT NOT NULL DEFAULT '{}'
 );
@@ -97,6 +102,9 @@ CREATE TABLE IF NOT EXISTS project_members (
   project_id TEXT NOT NULL REFERENCES projects(project_id),
   agent_id TEXT NOT NULL REFERENCES agents(agent_id),
   status TEXT NOT NULL,            -- invited|active|revoked|left|reviewer
+  -- role is orthogonal to status: a coordinator is an active member with the
+  -- authority to invite and remove others (RFC-1250 §2).
+  role TEXT NOT NULL DEFAULT 'member',  -- member|coordinator
   invited_by TEXT,
   joined_at TEXT,
   scope TEXT,                      -- reviewer only: the single task_id in view

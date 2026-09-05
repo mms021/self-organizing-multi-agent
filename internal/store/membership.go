@@ -56,13 +56,13 @@ type MembershipStore struct{ db *sql.DB }
 
 func NewMembershipStore(db *sql.DB) *MembershipStore { return &MembershipStore{db: db} }
 
-const membershipColumns = `project_id, agent_id, status, invited_by, joined_at, scope, expires_at, created_at`
+const membershipColumns = `project_id, agent_id, status, role, invited_by, joined_at, scope, expires_at, created_at`
 
 func scanMembership(row interface{ Scan(...any) error }) (model.ProjectMembership, error) {
 	var m model.ProjectMembership
 	var invitedBy, joinedAt, scope, expiresAt sql.NullString
 	var createdAt string
-	if err := row.Scan(&m.ProjectID, &m.AgentID, &m.Status, &invitedBy, &joinedAt, &scope, &expiresAt, &createdAt); err != nil {
+	if err := row.Scan(&m.ProjectID, &m.AgentID, &m.Status, &m.Role, &invitedBy, &joinedAt, &scope, &expiresAt, &createdAt); err != nil {
 		return model.ProjectMembership{}, err
 	}
 	if invitedBy.Valid {
@@ -150,11 +150,12 @@ func (s *MembershipStore) Invite(ctx context.Context, projectID, agentID, invite
 	}
 
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO project_members (`+membershipColumns+`) VALUES (?,?,?,?,?,?,?,?)
+		INSERT INTO project_members (`+membershipColumns+`) VALUES (?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(project_id, agent_id) DO UPDATE SET
-			status=excluded.status, invited_by=excluded.invited_by, joined_at=excluded.joined_at,
-			scope=excluded.scope, expires_at=excluded.expires_at, created_at=excluded.created_at`,
-		projectID, agentID, status, nullIfEmpty(invitedBy), joinedAt, scope, expiresAt, now.Format(time.RFC3339),
+			status=excluded.status, role=excluded.role, invited_by=excluded.invited_by,
+			joined_at=excluded.joined_at, scope=excluded.scope, expires_at=excluded.expires_at,
+			created_at=excluded.created_at`,
+		projectID, agentID, status, model.RoleMember, nullIfEmpty(invitedBy), joinedAt, scope, expiresAt, now.Format(time.RFC3339),
 	)
 	if err != nil {
 		return model.ProjectMembership{}, err
@@ -226,4 +227,68 @@ func (s *MembershipStore) CanRead(ctx context.Context, projectID, agentID string
 		return false, err
 	}
 	return m.Status == model.MemberActive, nil
+}
+
+// SetRole promotes or demotes an active member (RFC-1250 §2, §9). Only an
+// active member can hold authority: promoting a pending invitation or a
+// departed agent would grant rights to someone who is not in the project.
+func (s *MembershipStore) SetRole(ctx context.Context, projectID, agentID, role string) (model.ProjectMembership, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE project_members SET role=? WHERE project_id=? AND agent_id=? AND status=?`,
+		role, projectID, agentID, model.MemberActive)
+	if err != nil {
+		return model.ProjectMembership{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		existing, gerr := s.Get(ctx, projectID, agentID)
+		if gerr != nil {
+			return model.ProjectMembership{}, gerr
+		}
+		return model.ProjectMembership{}, model.Conflict("only an active member can hold a role").
+			WithDetails(map[string]string{"status": existing.Status})
+	}
+	return s.Get(ctx, projectID, agentID)
+}
+
+// Coordinators returns the project's coordinators, longest-standing first.
+//
+// RFC-1250 §9 orders succession by Influence (RFC-1500 §7), which is not
+// implemented — there are no reputation events yet to compute it from.
+// Tenure stands in for it: an explicit, checkable rule, rather than a
+// fabricated score that would look like reputation without being it.
+func (s *MembershipStore) Coordinators(ctx context.Context, projectID string) ([]model.ProjectMembership, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+membershipColumns+` FROM project_members
+		WHERE project_id=? AND status=? AND role=?
+		ORDER BY joined_at, agent_id`, projectID, model.MemberActive, model.RoleCoordinator)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []model.ProjectMembership
+	for rows.Next() {
+		m, err := scanMembership(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// CanAdminister reports whether agentID may invite and remove members: the
+// owner, or a coordinator they appointed (RFC-1250 §2).
+func (s *MembershipStore) CanAdminister(ctx context.Context, project model.Project, agentID string) (bool, error) {
+	if project.Owner == agentID {
+		return true, nil
+	}
+	m, err := s.Get(ctx, project.ProjectID, agentID)
+	if err != nil {
+		if model.IsCode(err, model.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return m.Status == model.MemberActive && m.Role == model.RoleCoordinator, nil
 }

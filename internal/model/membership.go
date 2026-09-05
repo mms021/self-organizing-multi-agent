@@ -11,6 +11,15 @@ const (
 	MemberReviewer = "reviewer"
 )
 
+// Roles within a project, RFC-1250 §2. A coordinator is an active member the
+// owner has entrusted with inviting and removing others; it is not a Role in
+// the RFC-1200 sense (those are out of scope) but an authority inside one
+// project.
+const (
+	RoleMember      = "member"
+	RoleCoordinator = "coordinator"
+)
+
 // Membership policies, RFC-1250 §2.
 const (
 	PolicyInviteOnly    = "invite_only"
@@ -23,6 +32,7 @@ type ProjectMembership struct {
 	ProjectID string     `json:"project_id"`
 	AgentID   string     `json:"agent_id"`
 	Status    string     `json:"status"`
+	Role      string     `json:"role"`
 	InvitedBy *string    `json:"invited_by"`
 	JoinedAt  *time.Time `json:"joined_at"`
 	Scope     *string    `json:"scope"`
@@ -84,4 +94,31 @@ func (r *InviteRequest) Validate() *APIError {
 // MembershipDecision answers a pending invitation or application.
 type MembershipDecision struct {
 	Accept bool `json:"accept"`
+}
+
+// SetRoleRequest promotes an active member to coordinator, or demotes one.
+// Only the owner may (RFC-1250 §9).
+type SetRoleRequest struct {
+	Role string `json:"role"`
+}
+
+func (r *SetRoleRequest) Validate() *APIError {
+	switch r.Role {
+	case RoleMember, RoleCoordinator:
+		return nil
+	}
+	return ValidationError("role must be member or coordinator")
+}
+
+// TransferRequest nominates the next owner. The nomination alone changes
+// nothing: ownership moves only once the nominee accepts (RFC-1250 §9).
+type TransferRequest struct {
+	NewOwner string `json:"new_owner"`
+}
+
+func (r *TransferRequest) Validate() *APIError {
+	if r.NewOwner == "" {
+		return ValidationError("new_owner is required")
+	}
+	return checkText("new_owner", r.NewOwner, MaxShortField)
 }

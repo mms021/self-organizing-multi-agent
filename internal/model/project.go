@@ -14,17 +14,19 @@ import "time"
 // enumerate what exists (§13). true advertises that the project exists
 // without exposing anything inside it.
 type Project struct {
-	ProjectID        string         `json:"project_id"`
-	SchemaVersion    string         `json:"schema_version"`
-	Name             string         `json:"name"`
-	Objective        string         `json:"objective"`
-	Visibility       string         `json:"visibility"`
-	Listed           bool           `json:"listed"`
-	MembershipPolicy string         `json:"membership_policy"`
-	Owner            string         `json:"owner"`
-	Status           string         `json:"status"`
-	CreatedAt        time.Time      `json:"created_at"`
-	Metadata         map[string]any `json:"metadata"`
+	ProjectID        string `json:"project_id"`
+	SchemaVersion    string `json:"schema_version"`
+	Name             string `json:"name"`
+	Objective        string `json:"objective"`
+	Visibility       string `json:"visibility"`
+	Listed           bool   `json:"listed"`
+	MembershipPolicy string `json:"membership_policy"`
+	Owner            string `json:"owner"`
+	// PendingOwner is a nomination awaiting the nominee's acceptance.
+	PendingOwner *string        `json:"pending_owner"`
+	Status       string         `json:"status"`
+	CreatedAt    time.Time      `json:"created_at"`
+	Metadata     map[string]any `json:"metadata"`
 }
 
 // Listing is the reduced view a non-member gets of a listed closed project:

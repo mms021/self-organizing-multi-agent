@@ -80,6 +80,9 @@ func NewRouter(s *Server) http.Handler {
 	mux.HandleFunc("GET /projects/{project_id}/members", s.RequireAuth(s.handleListMembers))
 	mux.HandleFunc("POST /projects/{project_id}/members/{agent_id}/decide", s.RequireAuth(s.handleDecideMembership))
 	mux.HandleFunc("DELETE /projects/{project_id}/members/{agent_id}", s.RequireAuth(s.handleRemoveMembership))
+	mux.HandleFunc("POST /projects/{project_id}/members/{agent_id}/role", s.RequireAuth(s.handleSetRole))
+	mux.HandleFunc("POST /projects/{project_id}/transfer", s.RequireAuth(s.handleTransfer))
+	mux.HandleFunc("POST /projects/{project_id}/transfer/decide", s.RequireAuth(s.handleDecideTransfer))
 
 	return s.recoverPanics(limitBodies(mux))
 }
