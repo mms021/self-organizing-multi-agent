@@ -29,7 +29,7 @@ func promptNonce(t *testing.T, prompt string) string {
 // nonce did not exist when that text was written.
 func TestVerifyPromptFencesHostileResult(t *testing.T) {
 	task := model.Task{Objective: "сложить два и два", SuccessCriteria: []string{"ответ 4"}}
-	prompt := verifyPrompt(task, attack)
+	prompt := verifyPrompt(task, VerificationInput{Result: model.ResultPayload{Summary: attack}})
 	nonce := promptNonce(t, prompt)
 
 	if strings.Count(prompt, "[DATA "+nonce+" ") != strings.Count(prompt, "[/DATA "+nonce+"]") {

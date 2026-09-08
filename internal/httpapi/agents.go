@@ -62,3 +62,23 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, agent)
 }
+
+func (s *Server) handleRotateCredential(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	token, _ := bearerToken(r)
+	out, err := s.Credentials.Rotate(r.Context(), token)
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleRevokeCredential(w http.ResponseWriter, r *http.Request) {
+	token, _ := bearerToken(r)
+	if err := s.Credentials.RevokeCurrent(r.Context(), token); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"revoked": true})
+}

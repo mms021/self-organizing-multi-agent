@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -37,6 +38,65 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		if _, err := s.Agents.Get(r.Context(), env.Recipient); err != nil {
 			s.writeErr(w, err)
 			return
+		}
+	}
+	if env.TaskID != "" {
+		// A task id makes the message part of that task's record. Resolve it
+		// through the sender's scope first, then require write-capable project
+		// membership for every participant. Otherwise a member could relay a
+		// closed task's payload to an outsider through a direct message.
+		task, err := s.Tasks.Get(r.Context(), agentID, env.TaskID)
+		if err != nil {
+			s.writeErr(w, err)
+			return
+		}
+		if task.ProjectID != nil {
+			if err := s.requireProjectWriter(r, *task.ProjectID, agentID); err != nil {
+				s.writeErr(w, err)
+				return
+			}
+			if env.Recipient == model.BroadcastRecipient {
+				project, err := s.Projects.Get(r.Context(), *task.ProjectID)
+				if err != nil {
+					s.writeErr(w, err)
+					return
+				}
+				if project.Visibility == model.ProjectClosed {
+					s.writeErr(w, model.AccessDenied("a closed-project task cannot broadcast messages"))
+					return
+				}
+			} else {
+				if _, err := s.Tasks.Get(r.Context(), env.Recipient, task.TaskID); err != nil {
+					s.writeErr(w, model.AccessDenied("recipient may not access this task"))
+					return
+				}
+				if err := s.requireProjectWriter(r, *task.ProjectID, env.Recipient); err != nil {
+					s.writeErr(w, model.AccessDenied("recipient may not receive project task messages"))
+					return
+				}
+			}
+		}
+		if env.Type == "RESULT" {
+			if task.Owner == nil || *task.Owner != agentID {
+				s.writeErr(w, model.AccessDenied("only the task's current owner may report a RESULT"))
+				return
+			}
+			if env.Recipient != task.CreatedBy {
+				s.writeErr(w, model.ValidationError("a task RESULT must be sent to its creator"))
+				return
+			}
+			var result model.ResultPayload
+			if err := json.Unmarshal(env.Payload, &result); err != nil {
+				s.writeErr(w, model.ValidationError("invalid RESULT payload"))
+				return
+			}
+			for _, artifactID := range result.Artifacts {
+				artifact, err := s.Artifacts.Get(r.Context(), agentID, artifactID)
+				if err != nil || artifact.TaskID == nil || *artifact.TaskID != task.TaskID || artifact.CreatedBy != agentID {
+					s.writeErr(w, model.ValidationError("RESULT artifacts must be created by the task owner and attached to this task"))
+					return
+				}
+			}
 		}
 	}
 

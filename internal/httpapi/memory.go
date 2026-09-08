@@ -20,6 +20,40 @@ func (s *Server) handleCreateKnowledge(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, aerr)
 		return
 	}
+	if req.TaskID != nil {
+		task, err := s.Tasks.Get(r.Context(), agentID, *req.TaskID)
+		if err != nil {
+			s.writeErr(w, err)
+			return
+		}
+		if req.ProjectID != nil && !sameProjectScope(req.ProjectID, task.ProjectID) {
+			s.writeErr(w, model.ValidationError("knowledge project_id must match its task's project_id"))
+			return
+		}
+		// Task-attached knowledge is evidence for that task, so its visibility
+		// follows the task. Omitting project_id must not accidentally make a
+		// closed-project lesson global.
+		req.ProjectID = task.ProjectID
+	}
+	if req.ProjectID != nil {
+		project, full, err := s.projectFor(r, *req.ProjectID, agentID)
+		if err != nil {
+			s.writeErr(w, err)
+			return
+		}
+		if !full {
+			s.writeErr(w, model.AccessDenied("only a project member may publish knowledge in it"))
+			return
+		}
+		if project.Status != model.ProjectActive {
+			s.writeErr(w, model.Conflict("cannot publish knowledge in an archived project"))
+			return
+		}
+		if err := s.requireProjectWriter(r, project.ProjectID, agentID); err != nil {
+			s.writeErr(w, err)
+			return
+		}
+	}
 
 	entry, err := s.Knowledge.Create(r.Context(), agentID, req)
 	if err != nil {
@@ -104,6 +138,41 @@ func (s *Server) handleCreateArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, aerr)
 		return
 	}
+	if req.TaskID != nil {
+		task, err := s.Tasks.Get(r.Context(), agentID, *req.TaskID)
+		if err != nil {
+			s.writeErr(w, err)
+			return
+		}
+		if req.ProjectID != nil && !sameProjectScope(req.ProjectID, task.ProjectID) {
+			s.writeErr(w, model.ValidationError("artifact project_id must match its task's project_id"))
+			return
+		}
+		// A task is the source of truth for an attached artifact's scope: this
+		// prevents a client from accidentally publishing project evidence as a
+		// global artifact by omitting project_id.
+		req.ProjectID = task.ProjectID
+		if task.ProjectID != nil {
+			if err := s.requireProjectWriter(r, *task.ProjectID, agentID); err != nil {
+				s.writeErr(w, err)
+				return
+			}
+		}
+	} else if req.ProjectID != nil {
+		project, full, err := s.projectFor(r, *req.ProjectID, agentID)
+		if err != nil {
+			s.writeErr(w, err)
+			return
+		}
+		if !full {
+			s.writeErr(w, model.AccessDenied("only a project member may create artifacts in it"))
+			return
+		}
+		if project.Status != model.ProjectActive {
+			s.writeErr(w, model.Conflict("cannot create an artifact in an archived project"))
+			return
+		}
+	}
 
 	artifact, err := s.Artifacts.Create(r.Context(), agentID, req)
 	if err != nil {
@@ -111,6 +180,13 @@ func (s *Server) handleCreateArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, artifact)
+}
+
+func sameProjectScope(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 func (s *Server) handleGetArtifact(w http.ResponseWriter, r *http.Request) {

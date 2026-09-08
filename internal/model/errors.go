@@ -16,6 +16,7 @@ const (
 	ErrValidationError = "validation_error"
 	ErrRateLimited     = "rate_limited"
 	ErrConflict        = "conflict"
+	ErrUnavailable     = "unavailable"
 	// ErrInternal covers failures that are the platform's own fault. Its
 	// message is deliberately fixed and uninformative: internal detail (SQL
 	// text, file paths) must not cross the trust boundary (RFC-1600 §2). The
@@ -39,11 +40,12 @@ func newErr(code, message string, retryable bool) *APIError {
 	return &APIError{ErrorCode: code, Message: message, Retryable: retryable}
 }
 
-func NotFound(message string) *APIError        { return newErr(ErrNotFound, message, false) }
-func AccessDenied(message string) *APIError    { return newErr(ErrAccessDenied, message, false) }
-func ValidationError(message string) *APIError { return newErr(ErrValidationError, message, false) }
-func Conflict(message string) *APIError        { return newErr(ErrConflict, message, false) }
-func RateLimited(message string) *APIError     { return newErr(ErrRateLimited, message, true) }
+func NotFound(message string) *APIError           { return newErr(ErrNotFound, message, false) }
+func AccessDenied(message string) *APIError       { return newErr(ErrAccessDenied, message, false) }
+func ValidationError(message string) *APIError    { return newErr(ErrValidationError, message, false) }
+func Conflict(message string) *APIError           { return newErr(ErrConflict, message, false) }
+func RateLimited(message string) *APIError        { return newErr(ErrRateLimited, message, true) }
+func ServiceUnavailable(message string) *APIError { return newErr(ErrUnavailable, message, true) }
 
 // Internal is the only way to build an internal error: it takes no message,
 // so no caller can accidentally leak detail into the response body.
@@ -82,6 +84,8 @@ func HTTPStatus(code string) int {
 		return http.StatusConflict
 	case ErrInternal:
 		return http.StatusInternalServerError
+	case ErrUnavailable:
+		return http.StatusServiceUnavailable
 	default:
 		// An unrecognised code is itself a bug: report it as a server fault
 		// rather than guessing a 4xx the client could act on.

@@ -4,6 +4,7 @@ import "time"
 
 // VerifyRequest is the POST /tasks/{task_id}/verify body (RFC-1100 §6.7).
 type VerifyRequest struct {
+	AttemptID       string   `json:"attempt_id,omitempty"`
 	TargetMessageID string   `json:"target_message_id"`
 	Verdict         string   `json:"verdict"`
 	Rationale       string   `json:"rationale,omitempty"`
@@ -11,6 +12,9 @@ type VerifyRequest struct {
 }
 
 func (r *VerifyRequest) Validate() *APIError {
+	if err := checkText("attempt_id", r.AttemptID, MaxShortField); err != nil {
+		return err
+	}
 	if r.TargetMessageID == "" {
 		return ValidationError("target_message_id is required")
 	}
@@ -45,4 +49,13 @@ type Verification struct {
 type VerifyResponse struct {
 	Task         Task         `json:"task"`
 	Verification Verification `json:"verification"`
+}
+
+// VerificationJob is a durable leased attempt, independent of inbox cursors.
+type VerificationJob struct {
+	AttemptID  string    `json:"attempt_id"`
+	Attempts   int       `json:"attempts"`
+	LeaseUntil time.Time `json:"lease_until"`
+	Task       Task      `json:"task"`
+	Result     Envelope  `json:"result"`
 }

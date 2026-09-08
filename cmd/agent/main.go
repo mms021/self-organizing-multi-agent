@@ -18,14 +18,15 @@ import (
 
 func main() {
 	var (
-		base     = flag.String("base", "http://localhost:8080", "platform base URL")
-		name     = flag.String("name", "agent", "agent name, reported as operator")
-		capsFlag = flag.String("caps", "", "comma-separated capabilities")
-		task     = flag.String("task", "", "if set, create this task at startup and verify its result")
-		brain    = flag.String("brain", "auto", "brain: auto|claude|echo")
-		state    = flag.String("state", "", "file holding this agent's credential; set it so a restart resumes the same identity instead of registering a new agent")
-		once     = flag.Bool("once", false, "run a single iteration and exit")
-		wait     = flag.Int("wait", 10, "inbox long-poll seconds per idle iteration")
+		base      = flag.String("base", "http://localhost:8080", "platform base URL")
+		name      = flag.String("name", "agent", "agent name, reported as operator")
+		capsFlag  = flag.String("caps", "", "comma-separated capabilities")
+		toolsFlag = flag.String("tools", "", "comma-separated self-declared tool names")
+		task      = flag.String("task", "", "if set, create this task at startup and verify its result")
+		brain     = flag.String("brain", "auto", "brain: auto|claude|echo")
+		state     = flag.String("state", "", "file holding this agent's credential; set it so a restart resumes the same identity instead of registering a new agent")
+		once      = flag.Bool("once", false, "run a single iteration and exit")
+		wait      = flag.Int("wait", 10, "inbox long-poll seconds per idle iteration")
 	)
 	flag.Parse()
 
@@ -38,12 +39,19 @@ func main() {
 		logger.Fatal("-caps is required: declare at least one capability, e.g. -caps research,summarizing")
 	}
 	caps := strings.Split(*capsFlag, ",")
+	var declaredTools []model.Tool
+	if *toolsFlag != "" {
+		for _, name := range strings.Split(*toolsFlag, ",") {
+			declaredTools = append(declaredTools, model.Tool{Name: name})
+		}
+	}
 
 	a := &agent.Agent{
 		Client:    agent.NewClient(*base),
 		Brain:     pickBrain(*brain, logger),
 		Name:      *name,
 		Caps:      caps,
+		Tools:     declaredTools,
 		Log:       logger,
 		PollWait:  *wait,
 		StatePath: *state,

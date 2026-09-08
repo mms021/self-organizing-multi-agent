@@ -30,7 +30,9 @@ TASK_ID=$(echo "$TASK" | jq -r .task_id)
 echo "task: $TASK_ID"
 
 echo "== B claims the task =="
-curl -sf -X POST "$BASE/tasks/$TASK_ID/claim" -H "Authorization: Bearer $B_TOKEN" | jq .
+CLAIM=$(curl -sf -X POST "$BASE/tasks/$TASK_ID/claim" -H "Authorization: Bearer $B_TOKEN")
+echo "$CLAIM" | jq .
+CLAIM_ID=$(echo "$CLAIM" | jq -r .claim_id)
 
 echo "== B posts a RESULT message =="
 curl -sf -X POST "$BASE/messages" -H "Authorization: Bearer $B_TOKEN" -d "{
@@ -42,7 +44,7 @@ curl -sf -X POST "$BASE/messages" -H "Authorization: Bearer $B_TOKEN" -d "{
   \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
   \"task_id\": \"$TASK_ID\",
   \"priority\": \"normal\",
-  \"payload\": {\"summary\": \"done\", \"status\": \"success\"}
+  \"payload\": {\"summary\": \"done\", \"status\": \"success\", \"claim_id\": \"$CLAIM_ID\"}
 }" | jq .
 
 echo "== A long-polls for it (should return promptly, not wait the full 30s) =="

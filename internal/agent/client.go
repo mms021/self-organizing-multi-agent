@@ -96,9 +96,18 @@ func (c *Client) Manifest(ctx context.Context) (map[string]any, error) {
 // agent_id/token on the client. Called with an existing token it is the
 // idempotent re-register path, which refreshes the profile in place.
 func (c *Client) Register(ctx context.Context, req model.RegisterRequest) error {
+	if c.Token != "" {
+		var check any
+		if err := c.do(ctx, http.MethodGet, "/tasks?limit=1", nil, &check); err != nil {
+			return fmt.Errorf("saved credential validation failed: %w", err)
+		}
+	}
 	var out model.RegisterResponse
 	if err := c.do(ctx, http.MethodPost, "/agents/register", req, &out); err != nil {
 		return err
+	}
+	if c.Token != "" && (out.Credential.Token != "" || (c.AgentID != "" && out.AgentID != c.AgentID)) {
+		return fmt.Errorf("registration changed identity; refusing to replace saved credential")
 	}
 	c.AgentID = out.AgentID
 	if out.Credential.Token != "" {
@@ -112,10 +121,19 @@ func (c *Client) CreateTask(ctx context.Context, req model.CreateTaskRequest) (m
 	return out, c.do(ctx, http.MethodPost, "/tasks", req, &out)
 }
 
-func (c *Client) ListTasks(ctx context.Context, status string) ([]model.Task, error) {
+// ListTasks returns tasks in status that are relevant to the supplied
+// capability profile. An empty capabilities list leaves the server-side
+// capability filter unset.
+func (c *Client) ListTasks(ctx context.Context, status string, capabilities, toolNames []string) ([]model.Task, error) {
 	q := url.Values{}
 	if status != "" {
 		q.Set("status", status)
+	}
+	if len(capabilities) > 0 {
+		q.Set("required_capabilities", strings.Join(capabilities, ","))
+	}
+	if len(toolNames) > 0 {
+		q.Set("required_tools", strings.Join(toolNames, ","))
 	}
 	var out struct {
 		Tasks []model.Task `json:"tasks"`
@@ -133,9 +151,22 @@ func (c *Client) ClaimTask(ctx context.Context, taskID string) (model.Task, erro
 	return out, c.do(ctx, http.MethodPost, "/tasks/"+taskID+"/claim", nil, &out)
 }
 
+func (c *Client) HeartbeatTask(ctx context.Context, taskID, claimID string) (model.Task, error) {
+	var out model.Task
+	return out, c.do(ctx, http.MethodPost, "/tasks/"+taskID+"/heartbeat", map[string]string{"claim_id": claimID}, &out)
+}
+
 func (c *Client) VerifyTask(ctx context.Context, taskID string, req model.VerifyRequest) (model.VerifyResponse, error) {
 	var out model.VerifyResponse
 	return out, c.do(ctx, http.MethodPost, "/tasks/"+taskID+"/verify", req, &out)
+}
+
+func (c *Client) ClaimVerification(ctx context.Context) (*model.VerificationJob, error) {
+	var out struct {
+		Job *model.VerificationJob `json:"job"`
+	}
+	err := c.do(ctx, http.MethodPost, "/verification/claim", nil, &out)
+	return out.Job, err
 }
 
 func (c *Client) PostMessage(ctx context.Context, env model.Envelope) (model.Envelope, error) {
@@ -174,9 +205,20 @@ func (c *Client) CreateArtifact(ctx context.Context, req model.CreateArtifactReq
 	return out, c.do(ctx, http.MethodPost, "/artifacts", req, &out)
 }
 
+func (c *Client) GetArtifact(ctx context.Context, artifactID string) (model.Artifact, error) {
+	var out model.Artifact
+	return out, c.do(ctx, http.MethodGet, "/artifacts/"+url.PathEscape(artifactID), nil, &out)
+}
+
 func (c *Client) CreateProject(ctx context.Context, req model.CreateProjectRequest) (model.Project, error) {
 	var out model.Project
 	return out, c.do(ctx, http.MethodPost, "/projects", req, &out)
+}
+
+// RequestOperator delivers a bounded wish, request or issue to the configured
+// operator channel. It never exposes Telegram credentials to the agent.
+func (c *Client) RequestOperator(ctx context.Context, req model.OperatorRequest) error {
+	return c.do(ctx, http.MethodPost, "/operator/requests", req, nil)
 }
 
 // Inbox drains new messages addressed to this agent, advancing the cursor so

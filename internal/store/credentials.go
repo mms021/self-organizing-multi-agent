@@ -52,3 +52,94 @@ func (s *CredentialStore) LookupAgentByToken(ctx context.Context, token string) 
 	}
 	return agentID, credentialID, true, nil
 }
+
+// Rotate atomically invalidates the presented key and creates its replacement.
+// Recheck under the transaction: middleware authentication may predate a revoke.
+func (s *CredentialStore) Rotate(ctx context.Context, token string) (model.CredentialOut, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.CredentialOut{}, err
+	}
+	defer tx.Rollback()
+	var agentID, oldID string
+	if err := tx.QueryRowContext(ctx, `SELECT agent_id,credential_id FROM credentials WHERE token_hash=? AND status='active'`, hashToken(token)).Scan(&agentID, &oldID); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return model.CredentialOut{}, err
+		}
+		return model.CredentialOut{}, model.Conflict("credential is no longer active")
+	}
+	out := model.CredentialOut{CredentialID: idgen.New("credential"), Token: idgen.Token()}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err = tx.ExecContext(ctx, `UPDATE credentials SET status='revoked' WHERE credential_id=?`, oldID); err != nil {
+		return model.CredentialOut{}, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO credentials(credential_id,agent_id,token_hash,status,rotated_from,issued_at) VALUES(?,?,?,'active',?,?)`, out.CredentialID, agentID, hashToken(out.Token), oldID, now); err != nil {
+		return model.CredentialOut{}, err
+	}
+	if err = credentialAudit(ctx, tx, agentID, agentID, oldID, "rotated"); err != nil {
+		return model.CredentialOut{}, err
+	}
+	return out, tx.Commit()
+}
+
+func credentialAudit(ctx context.Context, tx *sql.Tx, actor, agentID, credentialID, action string) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO credential_audit(event_id,actor,agent_id,credential_id,action,created_at) VALUES(?,?,?,?,?,?)`, idgen.New("credential-event"), actor, agentID, credentialID, action, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+func (s *CredentialStore) RevokeCurrent(ctx context.Context, token string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var agentID, credID string
+	if err := tx.QueryRowContext(ctx, `SELECT agent_id,credential_id FROM credentials WHERE token_hash=? AND status='active'`, hashToken(token)).Scan(&agentID, &credID); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		return model.Conflict("credential is no longer active")
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE credentials SET status='revoked' WHERE credential_id=?`, credID); err != nil {
+		return err
+	}
+	if err = credentialAudit(ctx, tx, agentID, agentID, credID, "revoked"); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RevokeAgent is reserved for the configured operator, never exposed to agents.
+func (s *CredentialStore) RevokeAgent(ctx context.Context, updateID int64, agentID string) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var prior string
+	err = tx.QueryRowContext(ctx, `SELECT agent_id FROM credential_operator_updates WHERE update_id=?`, updateID).Scan(&prior)
+	if err == nil {
+		if prior != agentID {
+			return false, model.Conflict("update already used")
+		}
+		return false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if err = tx.QueryRowContext(ctx, `SELECT agent_id FROM agents WHERE agent_id=?`, agentID).Scan(&prior); errors.Is(err, sql.ErrNoRows) {
+		return false, model.NotFound("agent not found")
+	} else if err != nil {
+		return false, err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE credentials SET status='revoked' WHERE agent_id=? AND status='active'`, agentID); err != nil {
+		return false, err
+	}
+	if err = credentialAudit(ctx, tx, "telegram-operator", agentID, "*", "revoked_all"); err != nil {
+		return false, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO credential_operator_updates(update_id,agent_id,created_at) VALUES(?,?,?)`, updateID, agentID, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}

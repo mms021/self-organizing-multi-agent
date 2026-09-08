@@ -111,6 +111,7 @@ type ClaimPayload struct {
 }
 
 type ResultPayload struct {
+	ClaimID   string         `json:"claim_id,omitempty"`
 	Summary   string         `json:"summary"`
 	Artifacts []string       `json:"artifacts,omitempty"`
 	Metrics   map[string]any `json:"metrics,omitempty"`
@@ -187,6 +188,9 @@ func ValidatePayload(msgType string, raw json.RawMessage) *APIError {
 		}
 		if p.Status != "success" && p.Status != "partial" && p.Status != "failure" {
 			return ValidationError("status must be success, partial or failure")
+		}
+		if err := checkList("artifacts", p.Artifacts, MaxListItems, MaxShortField); err != nil {
+			return err
 		}
 	case "VERIFY":
 		var p VerifyPayload

@@ -14,6 +14,7 @@ import (
 	"aichatdeck/internal/config"
 	"aichatdeck/internal/db"
 	"aichatdeck/internal/httpapi"
+	"aichatdeck/internal/notify"
 	"aichatdeck/internal/store"
 )
 
@@ -34,18 +35,24 @@ func main() {
 	}
 
 	server := &httpapi.Server{
-		Agents:      store.NewAgentStore(sqlDB),
-		Credentials: store.NewCredentialStore(sqlDB),
-		Tasks:       store.NewTaskStore(sqlDB),
-		Messages:    store.NewMessageStore(sqlDB),
-		Knowledge:   store.NewKnowledgeStore(sqlDB),
-		Artifacts:   store.NewArtifactStore(sqlDB),
-		Projects:    store.NewProjectStore(sqlDB),
-		Members:     store.NewMembershipStore(sqlDB),
-		Bus:         redisBus,
-		DB:          sqlDB,
-		RedisPinger: redisBus,
-		Logger:      log.Default(),
+		Agents:           store.NewAgentStore(sqlDB),
+		Credentials:      store.NewCredentialStore(sqlDB),
+		Tasks:            store.NewTaskStore(sqlDB),
+		Messages:         store.NewMessageStore(sqlDB),
+		Knowledge:        store.NewKnowledgeStore(sqlDB),
+		Artifacts:        store.NewArtifactStore(sqlDB),
+		Projects:         store.NewProjectStore(sqlDB),
+		Members:          store.NewMembershipStore(sqlDB),
+		OperatorRequests: store.NewOperatorRequestStore(sqlDB),
+		Bus:              redisBus,
+		DB:               sqlDB,
+		RedisPinger:      redisBus,
+		Logger:           log.Default(),
+	}
+	server.TelegramUserID = cfg.TelegramUserID
+	server.TelegramWebhookSecret = cfg.TelegramWebhookSecret
+	if cfg.TelegramBotToken != "" && cfg.TelegramChatID != "" {
+		server.OperatorNotifier = &notify.Telegram{Token: cfg.TelegramBotToken, ChatID: cfg.TelegramChatID}
 	}
 
 	httpServer := &http.Server{
@@ -56,6 +63,8 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	alertsDone := make(chan struct{})
+	go func() { defer close(alertsDone); server.RunVerificationAlerts(ctx) }()
 
 	go func() {
 		log.Printf("aichatdeck listening on %s (sqlite=%s redis=%s)", cfg.Addr, cfg.SQLitePath, cfg.RedisAddr)
@@ -71,4 +80,5 @@ func main() {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}
+	<-alertsDone
 }

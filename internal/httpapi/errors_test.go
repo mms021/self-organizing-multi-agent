@@ -136,7 +136,10 @@ func TestBadRequestBodiesAreValidationErrors(t *testing.T) {
 		{"missing objective", "/tasks", map[string]any{}},
 		{"bad category", "/memory/entries", map[string]any{"category": "gossip", "content": map[string]any{"a": 1}}},
 		{"empty content", "/memory/entries", map[string]any{"category": "lesson", "content": map[string]any{}}},
-		{"artifact without checksum", "/artifacts", map[string]any{"type": "file", "uri": "file:///x"}},
+		{"artifact without checksum", "/artifacts", map[string]any{"type": "file", "uri": "https://example.com/x"}},
+		{"executable artifact", "/artifacts", map[string]any{"type": "file", "uri": "https://example.com/run.exe", "checksum": "sha256:fake"}},
+		{"disguised executable artifact", "/artifacts", map[string]any{"type": "log", "uri": "https://example.com/report.exe.txt", "checksum": "sha256:fake"}},
+		{"local artifact", "/artifacts", map[string]any{"type": "file", "uri": "file:///tmp/report.txt", "checksum": "sha256:fake"}},
 		{"bad visibility", "/projects", map[string]any{"name": "p", "visibility": "secret"}},
 		{"listed on an open project", "/projects", map[string]any{"name": "p", "listed": false}},
 	}

@@ -25,22 +25,34 @@ type Pinger interface {
 }
 
 type Server struct {
-	Agents      *store.AgentStore
-	Credentials *store.CredentialStore
-	Tasks       *store.TaskStore
-	Messages    *store.MessageStore
-	Knowledge   *store.KnowledgeStore
-	Artifacts   *store.ArtifactStore
-	Projects    *store.ProjectStore
-	Members     *store.MembershipStore
-	Bus         bus.Bus
-	DB          *sql.DB
-	RedisPinger Pinger
-	Logger      *log.Logger // nil silences server-side logging (tests)
+	Agents                *store.AgentStore
+	Credentials           *store.CredentialStore
+	Tasks                 *store.TaskStore
+	Messages              *store.MessageStore
+	Knowledge             *store.KnowledgeStore
+	Artifacts             *store.ArtifactStore
+	Projects              *store.ProjectStore
+	Members               *store.MembershipStore
+	Bus                   bus.Bus
+	DB                    *sql.DB
+	RedisPinger           Pinger
+	Logger                *log.Logger // nil silences server-side logging (tests)
+	OperatorNotifier      OperatorNotifier
+	OperatorRequests      *store.OperatorRequestStore
+	TelegramUserID        string
+	TelegramWebhookSecret string
 
 	// Rate-limit state, per router (see NewRouter).
 	registerLimit *limiter
 	agentLimit    *limiter
+}
+
+type OperatorNotifier interface {
+	Notify(context.Context, string, model.OperatorRequest) (int64, error)
+}
+
+type TelegramMessenger interface {
+	Send(context.Context, string) (int64, error)
 }
 
 func NewRouter(s *Server) http.Handler {
@@ -48,12 +60,18 @@ func NewRouter(s *Server) http.Handler {
 	s.agentLimit = newLimiter(agentPerMinute, time.Minute)
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", s.handlePublicIndex)
+	mux.HandleFunc("GET /robots.txt", s.handleRobotsTXT)
+	mux.HandleFunc("GET /sitemap.xml", s.handleSitemap)
+	mux.HandleFunc("GET /llms.txt", s.handleLLMsTXT)
 	mux.HandleFunc("GET /manifest", s.handleManifest)
 	mux.HandleFunc("GET /discovery", s.handleDiscovery)
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /donate", s.handleDonate)
 
 	mux.HandleFunc("POST /agents/register", s.rateLimit(s.registerLimit, clientIP, s.handleRegister))
+	mux.HandleFunc("POST /operator/requests", s.RequireAuth(s.handleOperatorRequest))
+	mux.HandleFunc("POST /telegram/webhook", s.handleTelegramWebhook)
 	mux.HandleFunc("GET /agents/{agent_id}", s.RequireAuth(s.handleGetAgent))
 
 	mux.HandleFunc("POST /messages", s.RequireAuth(s.handlePostMessage))
@@ -63,7 +81,11 @@ func NewRouter(s *Server) http.Handler {
 	mux.HandleFunc("GET /tasks", s.RequireAuth(s.handleListTasks))
 	mux.HandleFunc("GET /tasks/{task_id}", s.RequireAuth(s.handleGetTask))
 	mux.HandleFunc("POST /tasks/{task_id}/claim", s.RequireAuth(s.handleClaimTask))
+	mux.HandleFunc("POST /tasks/{task_id}/heartbeat", s.RequireAuth(s.handleHeartbeatTask))
 	mux.HandleFunc("POST /tasks/{task_id}/verify", s.RequireAuth(s.handleVerifyTask))
+	mux.HandleFunc("POST /verification/claim", s.RequireAuth(s.handleClaimVerification))
+	mux.HandleFunc("POST /credentials/rotate", s.RequireAuth(s.handleRotateCredential))
+	mux.HandleFunc("POST /credentials/revoke", s.RequireAuth(s.handleRevokeCredential))
 
 	// Shared memory (RFC-1300) and its project scoping (RFC-1250).
 	mux.HandleFunc("POST /memory/entries", s.RequireAuth(s.handleCreateKnowledge))

@@ -84,11 +84,16 @@ func TestTwoAgentsCompleteATask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get task: %v", err)
 	}
-	if claimed.Status != model.TaskClaimed {
-		t.Fatalf("expected CLAIMED after worker iteration, got %s", claimed.Status)
+	if claimed.Status != model.TaskSubmitted {
+		t.Fatalf("expected SUBMITTED after worker iteration, got %s", claimed.Status)
 	}
 
-	// Creator: sees the RESULT in its inbox and verifies it.
+	// Simulate a crash after the inbox cursor advanced but before verification.
+	// The next iteration must discover the result via the durable queue.
+	if msgs, err := creator.Client.Inbox(ctx, 0, "RESULT"); err != nil || len(msgs) != 1 {
+		t.Fatalf("drain RESULT: %d %v", len(msgs), err)
+	}
+	// Creator verifies despite there being no new RESULT in its inbox.
 	if _, err := creator.RunOnce(ctx, 0); err != nil {
 		t.Fatalf("creator iteration: %v", err)
 	}

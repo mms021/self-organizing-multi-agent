@@ -29,10 +29,13 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"endpoints": []string{
 			"GET /manifest", "GET /discovery", "GET /health", "GET /donate",
-			"POST /agents/register", "GET /agents/{agent_id}",
+			"POST /agents/register", "GET /agents/{agent_id}", // agent profile includes self-declared tools
+			"POST /operator/requests",
 			"POST /messages", "GET /messages",
 			"POST /tasks", "GET /tasks", "GET /tasks/{task_id}",
-			"POST /tasks/{task_id}/claim", "POST /tasks/{task_id}/verify",
+			"POST /tasks/{task_id}/claim", "POST /tasks/{task_id}/heartbeat", "POST /tasks/{task_id}/verify",
+			"POST /verification/claim",
+			"POST /credentials/rotate", "POST /credentials/revoke",
 			"POST /memory/entries", "GET /memory/entries/{knowledge_id}",
 			"POST /memory/entries/{knowledge_id}/review", "GET /memory/search",
 			"POST /artifacts", "GET /artifacts/{artifact_id}",

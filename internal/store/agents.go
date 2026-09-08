@@ -50,9 +50,9 @@ func (s *AgentStore) Create(ctx context.Context, req model.RegisterRequest) (mod
 	metadata := buildMetadata(req)
 
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO agents (agent_id, schema_version, capabilities, skills, constraints, preferred_roles, evidence, operator, load, status, metadata, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		agentID, "1.0", toJSON(caps), toJSON(orEmptySlice(req.Skills)), toJSON(constraints),
+		INSERT INTO agents (agent_id, schema_version, capabilities, tools, skills, constraints, preferred_roles, evidence, operator, load, status, metadata, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		agentID, "1.0", toJSON(caps), toJSON(orEmptySlice(req.Tools)), toJSON(orEmptySlice(req.Skills)), toJSON(constraints),
 		toJSON(orEmptySlice(req.PreferredRoles)), toJSON(orEmptySlice(req.Evidence)), nullIfEmpty(req.Operator),
 		load, model.AgentReady, toJSON(metadata), now, now,
 	)
@@ -76,9 +76,9 @@ func (s *AgentStore) Update(ctx context.Context, agentID string, req model.Regis
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE agents SET capabilities=?, skills=?, constraints=?, preferred_roles=?, evidence=?, operator=?, load=?, metadata=?, updated_at=?
+		UPDATE agents SET capabilities=?, tools=?, skills=?, constraints=?, preferred_roles=?, evidence=?, operator=?, load=?, metadata=?, updated_at=?
 		WHERE agent_id=?`,
-		toJSON(caps), toJSON(orEmptySlice(req.Skills)), toJSON(constraints), toJSON(orEmptySlice(req.PreferredRoles)),
+		toJSON(caps), toJSON(orEmptySlice(req.Tools)), toJSON(orEmptySlice(req.Skills)), toJSON(constraints), toJSON(orEmptySlice(req.PreferredRoles)),
 		toJSON(orEmptySlice(req.Evidence)), nullIfEmpty(req.Operator), load, toJSON(metadata), now, agentID,
 	)
 	if err != nil {
@@ -92,18 +92,19 @@ func (s *AgentStore) Update(ctx context.Context, agentID string, req model.Regis
 
 func (s *AgentStore) Get(ctx context.Context, agentID string) (model.Agent, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT agent_id, schema_version, capabilities, constraints, load, status, metadata
+		SELECT agent_id, schema_version, capabilities, tools, constraints, load, status, metadata
 		FROM agents WHERE agent_id=?`, agentID)
 
 	var a model.Agent
-	var capsJSON, constraintsJSON, metadataJSON string
-	if err := row.Scan(&a.AgentID, &a.SchemaVersion, &capsJSON, &constraintsJSON, &a.Load, &a.Status, &metadataJSON); err != nil {
+	var capsJSON, toolsJSON, constraintsJSON, metadataJSON string
+	if err := row.Scan(&a.AgentID, &a.SchemaVersion, &capsJSON, &toolsJSON, &constraintsJSON, &a.Load, &a.Status, &metadataJSON); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.Agent{}, model.NotFound("agent not found")
 		}
 		return model.Agent{}, err
 	}
 	a.Capabilities = fromJSON[[]model.Capability](capsJSON)
+	a.Tools = fromJSON[[]model.Tool](toolsJSON)
 	a.Constraints = fromJSON[map[string]any](constraintsJSON)
 	a.Metadata = fromJSON[map[string]any](metadataJSON)
 	a.Roles = []string{}            // Roles (RFC-1200) out of scope this milestone.

@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -21,16 +22,38 @@ type State struct {
 // LoadState reads agent state from path. A missing file is not an error: it
 // means this agent has never registered.
 func LoadState(path string) (State, bool, error) {
-	data, err := os.ReadFile(path)
+	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
 		return State{}, false, nil
 	}
 	if err != nil {
 		return State{}, false, fmt.Errorf("read agent state: %w", err)
 	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+		return State{}, false, fmt.Errorf("agent state must be a regular owner-only file (chmod 600)")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return State{}, false, err
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil {
+		return State{}, false, err
+	}
+	if !os.SameFile(info, opened) || opened.Mode().Perm()&0077 != 0 {
+		return State{}, false, fmt.Errorf("agent state changed while opening")
+	}
 	var s State
+	data, err := io.ReadAll(io.LimitReader(f, 65537))
+	if err != nil {
+		return State{}, false, err
+	}
+	if len(data) > 65536 {
+		return State{}, false, fmt.Errorf("agent state exceeds size limit")
+	}
 	if err := json.Unmarshal(data, &s); err != nil {
-		return State{}, false, fmt.Errorf("parse agent state %s: %w", path, err)
+		return State{}, false, fmt.Errorf("parse agent state: %w", err)
 	}
 	if s.Token == "" || s.AgentID == "" {
 		return State{}, false, nil
@@ -50,8 +73,26 @@ func SaveState(path string, s State) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write agent state: %w", err)
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return fmt.Errorf("refusing non-regular agent state path")
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
 	}
-	return nil
+	f, err := os.CreateTemp(filepath.Dir(path), ".agent-state-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err = f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }

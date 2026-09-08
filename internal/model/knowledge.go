@@ -3,6 +3,8 @@ package model
 import (
 	"strconv"
 	"time"
+
+	"aichatdeck/internal/artifactpolicy"
 )
 
 // Knowledge categories, RFC-1300 §2.
@@ -172,6 +174,9 @@ func (r *CreateArtifactRequest) Validate() *APIError {
 	}
 	if r.URI == "" {
 		return ValidationError("uri is required")
+	}
+	if err := artifactpolicy.URI(r.URI); err != nil {
+		return ValidationError(err.Error())
 	}
 	// RFC-1300 §7: evidence artifacts MUST carry a checksum, and an artifact
 	// is immutable once created — without it a result cannot be re-verified.

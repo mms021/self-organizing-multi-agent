@@ -32,13 +32,30 @@ func (s *KnowledgeStore) Create(ctx context.Context, author string, req model.Cr
 	if req.Supersedes != nil {
 		var prevVersion int
 		var prevSupersededBy sql.NullString
-		err := tx.QueryRowContext(ctx, `SELECT version, superseded_by FROM knowledge WHERE knowledge_id=?`, *req.Supersedes).
-			Scan(&prevVersion, &prevSupersededBy)
+		var prevProject, prevTask sql.NullString
+		// Check mutation rights inside the transaction. Reviewer grants are
+		// read-only and must not authorize replacing an existing record.
+		args := append([]any{*req.Supersedes}, visibleScopeArgs(author, false)...)
+		err := tx.QueryRowContext(ctx, `SELECT version, superseded_by, project_id, task_id FROM knowledge WHERE knowledge_id=? AND `+visibleScopeSQL(""), args...).
+			Scan(&prevVersion, &prevSupersededBy, &prevProject, &prevTask)
 		if errors.Is(err, sql.ErrNoRows) {
-			return model.Knowledge{}, model.ValidationError("supersedes refers to a knowledge_id that does not exist")
+			return model.Knowledge{}, model.NotFound("knowledge entry not found")
 		}
 		if err != nil {
 			return model.Knowledge{}, err
+		}
+		if prevProject.Valid != (req.ProjectID != nil) || (prevProject.Valid && prevProject.String != *req.ProjectID) ||
+			prevTask.Valid != (req.TaskID != nil) || (prevTask.Valid && prevTask.String != *req.TaskID) {
+			return model.Knowledge{}, model.ValidationError("replacement must preserve project_id and task_id")
+		}
+		if prevProject.Valid {
+			var status string
+			if err := tx.QueryRowContext(ctx, `SELECT status FROM projects WHERE project_id=?`, prevProject.String).Scan(&status); err != nil {
+				return model.Knowledge{}, err
+			}
+			if status != model.ProjectActive {
+				return model.Knowledge{}, model.Conflict("cannot replace knowledge in an archived project")
+			}
 		}
 		if prevSupersededBy.Valid {
 			return model.Knowledge{}, model.Conflict("that record has already been superseded").
@@ -139,8 +156,12 @@ func (s *KnowledgeStore) Get(ctx context.Context, viewer, id string) (model.Know
 // Review moves proposed -> reviewed (RFC-1300 §4). Anyone with access may
 // review; promoting to verified/rejected is not possible here by design.
 func (s *KnowledgeStore) Review(ctx context.Context, reviewer, id string) (model.Knowledge, error) {
-	res, err := s.db.ExecContext(ctx, `UPDATE knowledge SET status=? WHERE knowledge_id=? AND status=?`,
-		model.KnowledgeReviewed, id, model.KnowledgeProposed)
+	// Scope the mutation itself. Checking visibility only after an unscoped
+	// UPDATE would let an outsider who guessed a knowledge_id change a closed
+	// record and merely receive a misleading 404 afterwards.
+	args := append([]any{model.KnowledgeReviewed, id, model.KnowledgeProposed}, visibleScopeArgs(reviewer, true)...)
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE knowledge SET status=? WHERE knowledge_id=? AND status=? AND `+visibleScopeSQL("task_id"), args...)
 	if err != nil {
 		return model.Knowledge{}, err
 	}

@@ -86,6 +86,17 @@ func TestClosedProjectHidesKnowledgeFromOutsiders(t *testing.T) {
 		t.Fatalf("direct fetch: expected 404, got %d: %v", status, body)
 	}
 
+	// The same disclosure rule must protect mutations too: a guessed id may
+	// not let an outsider change a private record before receiving its 404.
+	status, _ = outsider.do(http.MethodPost, "/memory/entries/"+secretID+"/review", map[string]any{})
+	if status != http.StatusNotFound {
+		t.Fatalf("outsider review: expected 404, got %d", status)
+	}
+	status, reviewed := owner.do(http.MethodGet, "/memory/entries/"+secretID, nil)
+	if status != http.StatusOK || reviewed["status"] != "proposed" {
+		t.Fatalf("outsider changed private knowledge status: %d %v", status, reviewed)
+	}
+
 	// The owner still sees both.
 	ownerSees := searchSummaries(t, owner, "recipe")
 	if len(ownerSees) != 2 {
@@ -213,6 +224,160 @@ func TestClosedProjectMembershipLifecycle(t *testing.T) {
 	}
 }
 
+// Project-scoped tasks follow the same isolation rules as project knowledge:
+// outsiders cannot enumerate or claim them, while a member can discover and
+// work on them after accepting an invitation.
+func TestClosedProjectTasksRequireMembership(t *testing.T) {
+	srv := newTestServer(t)
+	owner := register(t, srv.URL)
+	member := register(t, srv.URL)
+	outsider := register(t, srv.URL)
+	memberID := mustAgentID(t, member)
+
+	projectID := createProject(t, owner, map[string]any{"name": "task-club", "visibility": "closed"})
+	status, task := owner.do(http.MethodPost, "/tasks", map[string]any{
+		"objective": "private work", "project_id": projectID,
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("create project task: expected 201, got %d: %v", status, task)
+	}
+	taskID, _ := task["task_id"].(string)
+
+	// A hidden project's id cannot be used to create, read or claim tasks.
+	status, _ = outsider.do(http.MethodPost, "/tasks", map[string]any{
+		"objective": "intrude", "project_id": projectID,
+	})
+	if status != http.StatusNotFound {
+		t.Fatalf("outsider create: expected 404, got %d", status)
+	}
+	status, listed := outsider.do(http.MethodGet, "/tasks?status=OPEN&project_id="+projectID, nil)
+	if status != http.StatusOK {
+		t.Fatalf("outsider list: expected 200, got %d: %v", status, listed)
+	}
+	if tasks, _ := listed["tasks"].([]any); len(tasks) != 0 {
+		t.Fatalf("outsider discovered closed-project tasks: %v", tasks)
+	}
+	status, _ = outsider.do(http.MethodPost, "/tasks/"+taskID+"/claim", nil)
+	if status != http.StatusNotFound {
+		t.Fatalf("outsider claim: expected 404, got %d", status)
+	}
+
+	status, out := owner.do(http.MethodPost, "/projects/"+projectID+"/invite", map[string]any{"agent_id": memberID})
+	if status != http.StatusCreated {
+		t.Fatalf("invite member: expected 201, got %d: %v", status, out)
+	}
+	status, out = member.do(http.MethodPost, "/projects/"+projectID+"/members/"+memberID+"/decide", map[string]any{"accept": true})
+	if status != http.StatusOK {
+		t.Fatalf("accept membership: expected 200, got %d: %v", status, out)
+	}
+
+	status, listed = member.do(http.MethodGet, "/tasks?status=OPEN&project_id="+projectID, nil)
+	if status != http.StatusOK {
+		t.Fatalf("member list: expected 200, got %d: %v", status, listed)
+	}
+	if tasks, _ := listed["tasks"].([]any); len(tasks) != 1 {
+		t.Fatalf("member should see exactly the project task, got %v", listed)
+	}
+	status, out = member.do(http.MethodPost, "/tasks/"+taskID+"/claim", nil)
+	if status != http.StatusOK || out["status"] != "CLAIMED" {
+		t.Fatalf("member claim: expected claimed task, got %d: %v", status, out)
+	}
+}
+
+// A task_id must not become an exfiltration label: task messages stay between
+// active members, and evidence inherits the task's project rather than a
+// client-supplied (or omitted) scope.
+func TestClosedProjectTaskMessagesAndArtifactsStayScoped(t *testing.T) {
+	srv := newTestServer(t)
+	owner := register(t, srv.URL)
+	member := register(t, srv.URL)
+	outsider := register(t, srv.URL)
+	ownerID := mustAgentID(t, owner)
+	memberID := mustAgentID(t, member)
+	outsiderID := mustAgentID(t, outsider)
+
+	projectID := createProject(t, owner, map[string]any{"name": "sealed", "visibility": "closed"})
+	joinProject(t, owner, member, projectID, memberID)
+	status, task := owner.do(http.MethodPost, "/tasks", map[string]any{
+		"objective": "sealed work", "project_id": projectID,
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("create project task: expected 201, got %d: %v", status, task)
+	}
+	taskID, _ := task["task_id"].(string)
+	claimStatus, claimOut := member.do(http.MethodPost, "/tasks/"+taskID+"/claim", nil)
+	if claimStatus != http.StatusOK {
+		t.Fatalf("member claim: expected 200, got %d: %v", claimStatus, claimOut)
+	}
+
+	message := func(id, recipient string) map[string]any {
+		return map[string]any{
+			"message_id": id, "protocol_version": "1.0", "type": "RESULT",
+			"sender": memberID, "recipient": recipient, "task_id": taskID,
+			"timestamp": "2026-09-06T00:00:00Z", "priority": "normal",
+			"payload": map[string]any{"summary": "sealed result", "status": "success", "claim_id": claimOut["claim_id"]},
+		}
+	}
+	if status, out := member.do(http.MethodPost, "/messages", message("sealed-to-owner", ownerID)); status != http.StatusCreated {
+		t.Fatalf("member message to owner: expected 201, got %d: %v", status, out)
+	}
+	if status, _ := member.do(http.MethodPost, "/messages", message("sealed-to-outsider", outsiderID)); status != http.StatusForbidden {
+		t.Fatalf("member message to outsider: expected 403, got %d", status)
+	}
+	if status, _ := member.do(http.MethodPost, "/messages", message("sealed-broadcast", "broadcast")); status != http.StatusForbidden {
+		t.Fatalf("closed task broadcast: expected 403, got %d", status)
+	}
+
+	artifactBody := map[string]any{
+		"type": "test_result", "uri": "https://example.com/sealed.txt", "checksum": "sha256:sealed", "task_id": taskID,
+	}
+	status, artifact := member.do(http.MethodPost, "/artifacts", artifactBody)
+	if status != http.StatusCreated {
+		t.Fatalf("create scoped artifact: expected 201, got %d: %v", status, artifact)
+	}
+	if artifact["project_id"] != projectID {
+		t.Fatalf("artifact did not inherit task project: %v", artifact)
+	}
+	artifactID, _ := artifact["artifact_id"].(string)
+	if status, _ := outsider.do(http.MethodGet, "/artifacts/"+artifactID, nil); status != http.StatusNotFound {
+		t.Fatalf("outsider artifact fetch: expected 404, got %d", status)
+	}
+
+	badScope := map[string]any{
+		"type": "file", "uri": "https://example.com/mismatch", "checksum": "sha256:mismatch",
+		"task_id": taskID, "project_id": "project-other",
+	}
+	if status, _ := member.do(http.MethodPost, "/artifacts", badScope); status != http.StatusBadRequest {
+		t.Fatalf("mismatched artifact scope: expected 400, got %d", status)
+	}
+
+	knowledgeBody := map[string]any{
+		"category": "lesson", "content": map[string]any{"summary": "sealed lesson"}, "task_id": taskID,
+	}
+	status, knowledge := member.do(http.MethodPost, "/memory/entries", knowledgeBody)
+	if status != http.StatusCreated {
+		t.Fatalf("create scoped knowledge: expected 201, got %d: %v", status, knowledge)
+	}
+	if knowledge["project_id"] != projectID {
+		t.Fatalf("knowledge did not inherit task project: %v", knowledge)
+	}
+	knowledgeID, _ := knowledge["knowledge_id"].(string)
+	if status, _ := outsider.do(http.MethodGet, "/memory/entries/"+knowledgeID, nil); status != http.StatusNotFound {
+		t.Fatalf("outsider knowledge fetch: expected 404, got %d", status)
+	}
+	if status, _ := outsider.do(http.MethodPost, "/memory/entries", map[string]any{
+		"category": "lesson", "content": map[string]any{"summary": "intrusion"}, "project_id": projectID,
+	}); status != http.StatusNotFound {
+		t.Fatalf("outsider knowledge publish: expected 404, got %d", status)
+	}
+	if status, _ := member.do(http.MethodPost, "/memory/entries", map[string]any{
+		"category": "lesson", "content": map[string]any{"summary": "mismatch"},
+		"task_id": taskID, "project_id": "project-other",
+	}); status != http.StatusBadRequest {
+		t.Fatalf("mismatched knowledge scope: expected 400, got %d", status)
+	}
+}
+
 // An invite-only project refuses applications; invite_or_apply accepts them,
 // and the owner decides (RFC-1250 §6).
 func TestClosedProjectApplicationPolicy(t *testing.T) {
@@ -264,7 +429,9 @@ func TestReviewerAccessIsNarrow(t *testing.T) {
 	projectID := createProject(t, owner, map[string]any{"name": "audited", "visibility": "closed"})
 
 	// Two tasks in the project; the reviewer will be scoped to the first.
-	status, taskBody := owner.do(http.MethodPost, "/tasks", map[string]any{"objective": "under review"})
+	status, taskBody := owner.do(http.MethodPost, "/tasks", map[string]any{
+		"objective": "under review", "project_id": projectID,
+	})
 	if status != http.StatusCreated {
 		t.Fatalf("create task: %d", status)
 	}
@@ -289,6 +456,16 @@ func TestReviewerAccessIsNarrow(t *testing.T) {
 	}
 	if body["status"] != "reviewer" {
 		t.Fatalf("expected reviewer status, got %v", body["status"])
+	}
+	status, _ = reviewer.do(http.MethodPost, "/tasks/"+reviewedTask+"/claim", nil)
+	if status != http.StatusForbidden {
+		t.Fatalf("reviewer claim: expected 403, got %d", status)
+	}
+	status, _ = reviewer.do(http.MethodPost, "/tasks/"+reviewedTask+"/verify", map[string]any{
+		"target_message_id": "message-does-not-matter", "verdict": "verified",
+	})
+	if status != http.StatusForbidden {
+		t.Fatalf("reviewer verify: expected 403, got %d", status)
 	}
 
 	seen := searchSummaries(t, reviewer, "note")

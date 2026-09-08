@@ -91,7 +91,7 @@ func TestTaskLifecycle(t *testing.T) {
 		Recipient:       creator.AgentID,
 		TaskID:          task.TaskID,
 		Priority:        "normal",
-		Payload:         []byte(`{"summary":"done","status":"success"}`),
+		Payload:         []byte(toJSON(model.ResultPayload{Summary: "done", Status: "success", ClaimID: claimed.ClaimID})),
 	}
 	resultMsg.Timestamp = time.Now().UTC()
 	stored, _, err := stores.Msgs.Insert(ctx, resultMsg)
@@ -125,15 +125,15 @@ func TestTaskLifecycle(t *testing.T) {
 		t.Fatalf("expected validation_error for wrong-type target, got %s", code)
 	}
 
-	// Inconclusive leaves the task CLAIMED.
+	// Inconclusive leaves the task SUBMITTED.
 	afterTask, _, err := stores.Tasks.Verify(ctx, task.TaskID, creator.AgentID, model.VerifyRequest{
 		TargetMessageID: stored.MessageID, Verdict: "inconclusive",
 	})
 	if err != nil {
 		t.Fatalf("verify inconclusive: %v", err)
 	}
-	if afterTask.Status != model.TaskClaimed {
-		t.Fatalf("expected still CLAIMED after inconclusive, got %s", afterTask.Status)
+	if afterTask.Status != model.TaskSubmitted {
+		t.Fatalf("expected still SUBMITTED after inconclusive, got %s", afterTask.Status)
 	}
 
 	// Verified transitions to COMPLETED.
@@ -166,6 +166,41 @@ func TestTaskIdempotentCreate(t *testing.T) {
 	}
 	if t1.TaskID != t2.TaskID {
 		t.Fatalf("expected same task_id for replayed idempotency key, got %s vs %s", t1.TaskID, t2.TaskID)
+	}
+}
+
+func TestTaskLeaseHeartbeatAndExpiry(t *testing.T) {
+	ctx := context.Background()
+	stores := openTestDB(t)
+	creator := mustCreateAgent(t, stores.Agents)
+	worker := mustCreateAgent(t, stores.Agents)
+	other := mustCreateAgent(t, stores.Agents)
+	task, err := stores.Tasks.Create(ctx, creator.AgentID, model.CreateTaskRequest{Objective: "leased work"}, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	claimed, err := stores.Tasks.Claim(ctx, task.TaskID, worker.AgentID)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if claimed.ClaimedAt == nil || claimed.LeaseExpiresAt == nil {
+		t.Fatalf("claim did not set lease: %+v", claimed)
+	}
+	if _, err := stores.Tasks.Heartbeat(ctx, task.TaskID, other.AgentID, claimed.ClaimID); apiCode(t, err) != model.ErrConflict {
+		t.Fatal("another agent renewed the lease")
+	}
+	if _, err := stores.Tasks.Heartbeat(ctx, task.TaskID, worker.AgentID, claimed.ClaimID); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	if err := stores.Tasks.requeueExpiredAt(ctx, time.Now().Add(6*time.Minute)); err != nil {
+		t.Fatalf("requeue: %v", err)
+	}
+	requeued, err := stores.Tasks.Get(ctx, creator.AgentID, task.TaskID)
+	if err != nil {
+		t.Fatalf("get requeued: %v", err)
+	}
+	if requeued.Status != model.TaskOpen || requeued.Owner != nil || requeued.LeaseExpiresAt != nil {
+		t.Fatalf("expired task not reset: %+v", requeued)
 	}
 }
 

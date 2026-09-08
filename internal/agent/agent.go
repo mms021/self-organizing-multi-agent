@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"time"
 
 	"aichatdeck/internal/idgen"
@@ -14,11 +15,16 @@ import (
 // Agent is one participant: a platform connection, a brain, and the loop
 // that turns "there are open tasks" into claimed, done, verified work.
 type Agent struct {
-	Client *Client
-	Brain  Brain
-	Name   string
-	Caps   []string
-	Log    *log.Logger
+	Client       *Client
+	Brain        Brain
+	Name         string
+	Caps         []string
+	Tools        []model.Tool
+	artifactHTTP *http.Client // isolated fetch transport; nil uses secure defaults
+	// OnOperatorAnswer lets the runtime resume its own pending workflow.
+	OnOperatorAnswer       func(context.Context, string, string) error
+	pendingOperatorAnswers []model.Envelope
+	Log                    *log.Logger
 
 	// PollWait is how long an idle iteration long-polls the inbox before
 	// giving up and looking for tasks again.
@@ -64,6 +70,7 @@ func (a *Agent) Bootstrap(ctx context.Context) error {
 	// refreshes the profile; without one it mints a new identity.
 	if err := a.Client.Register(ctx, model.RegisterRequest{
 		Capabilities: caps,
+		Tools:        a.Tools,
 		Skills:       a.Caps,
 		Operator:     a.Name,
 	}); err != nil {
@@ -124,64 +131,138 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 }
 
-// handleInbox verifies RESULT messages for tasks this agent created. It asks
-// the server for RESULT only: draining every broadcast just to discard it is
-// exactly the noise RFC-1100 §15 tells agents to avoid, and it grows with the
-// number of agents.
+// handleInbox routes platform ANSWERs to the runtime and verifies RESULTs.
+// Unrelated broadcast traffic is excluded by the inbox filter.
 func (a *Agent) handleInbox(ctx context.Context, waitSeconds int) (bool, error) {
-	msgs, err := a.Client.Inbox(ctx, waitSeconds, "RESULT")
+	msgs, err := a.Client.Inbox(ctx, waitSeconds, "RESULT", "ANSWER")
 	if err != nil {
 		return false, fmt.Errorf("inbox: %w", err)
 	}
 
 	acted := false
 	for _, msg := range msgs {
-		if msg.TaskID == "" {
-			continue // a RESULT with no task is not actionable
+		if msg.Type == "ANSWER" && msg.Sender == "platform" && msg.ReplyTo != nil {
+			a.pendingOperatorAnswers = append(a.pendingOperatorAnswers, msg)
 		}
-
-		task, err := a.Client.GetTask(ctx, msg.TaskID)
-		if err != nil {
-			a.logf("inbox: cannot load task %s: %v", msg.TaskID, err)
-			continue
+	}
+	for len(a.pendingOperatorAnswers) > 0 {
+		msg := a.pendingOperatorAnswers[0]
+		var answer model.AnswerPayload
+		if err := json.Unmarshal(msg.Payload, &answer); err != nil {
+			return acted, err
 		}
-		if task.CreatedBy != a.Client.AgentID {
-			continue // not mine to verify
+		if a.OnOperatorAnswer != nil {
+			if err := a.OnOperatorAnswer(ctx, *msg.ReplyTo, answer.Answer); err != nil {
+				return acted, err
+			}
+		} else {
+			a.logf("operator answer for %s: %s", *msg.ReplyTo, answer.Answer)
 		}
-		if task.Status != model.TaskClaimed {
-			continue // already resolved
-		}
-
-		var payload model.ResultPayload
-		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-			a.logf("inbox: bad RESULT payload in %s: %v", msg.MessageID, err)
-			continue
-		}
-
-		verdict, rationale, err := a.Brain.Verify(ctx, task, payload.Summary)
-		if err != nil {
-			return acted, fmt.Errorf("brain verify: %w", err)
-		}
-
-		resp, err := a.Client.VerifyTask(ctx, task.TaskID, model.VerifyRequest{
-			TargetMessageID: msg.MessageID,
-			Verdict:         verdict,
-			Rationale:       rationale,
-		})
-		if err != nil {
-			a.logf("verify %s: %v", task.TaskID, err)
-			continue
-		}
-		a.logf("verified %s: %s -> %s", task.TaskID, verdict, resp.Task.Status)
+		a.pendingOperatorAnswers = a.pendingOperatorAnswers[1:]
 		acted = true
 	}
-	return acted, nil
+	// RESULT inbox entries only wake the poll. The database queue, not the
+	// consumed inbox cursor, is authoritative after crashes and restarts.
+	job, err := a.Client.ClaimVerification(ctx)
+	if err != nil {
+		return acted, fmt.Errorf("verification queue: %w", err)
+	}
+	if job == nil {
+		return acted, nil
+	}
+	did, err := a.verifyJob(ctx, *job)
+	return acted || did, err
+}
+
+func (a *Agent) verifyJob(ctx context.Context, job model.VerificationJob) (bool, error) {
+	verifyCtx, cancelVerify := context.WithTimeout(ctx, 4*time.Minute)
+	defer cancelVerify()
+	ctx = verifyCtx
+	var err error
+	task, msg := job.Task, job.Result
+	if task.CreatedBy != a.Client.AgentID {
+		return false, fmt.Errorf("verification job belongs to another creator")
+	}
+	if task.Status != model.TaskSubmitted || task.SubmittedMessageID != msg.MessageID {
+		return false, fmt.Errorf("verification job is not the submitted result")
+	}
+
+	var payload model.ResultPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		return true, fmt.Errorf("verification RESULT payload: %w", err)
+	}
+
+	input := VerificationInput{Result: payload}
+	var evidence []string
+	seen := map[string]bool{}
+	unavailable := false
+	contentClient := a.artifactHTTP
+	if contentClient == nil {
+		contentClient = artifactHTTPClient()
+	}
+	artifactCtx, cancelArtifacts := context.WithTimeout(ctx, 30*time.Second)
+	for _, artifactID := range payload.Artifacts {
+		if seen[artifactID] {
+			continue
+		}
+		seen[artifactID] = true
+		if len(seen) > maxVerificationArtifacts {
+			unavailable = true
+			break
+		}
+		artifact, err := a.Client.GetArtifact(artifactCtx, artifactID)
+		if err != nil || artifact.ArtifactID != artifactID || artifact.TaskID == nil || *artifact.TaskID != task.TaskID || artifact.CreatedBy != msg.Sender || (artifact.ExpiresAt != nil && !artifact.ExpiresAt.After(time.Now())) {
+			unavailable = true
+			continue
+		}
+		input.Artifacts = append(input.Artifacts, artifact)
+		content, err := fetchArtifactContent(artifactCtx, contentClient, artifact)
+		if err != nil {
+			unavailable = true
+			a.logf("artifact content unavailable: %v", err)
+			continue
+		}
+		input.Contents = append(input.Contents, content)
+		evidence = append(evidence, artifactID)
+	}
+	cancelArtifacts()
+	contentClient.CloseIdleConnections()
+	verdict, rationale := "inconclusive", "referenced artifact is unavailable, out of scope, unsupported, exceeds verification limits or failed SHA-256 validation"
+	if !unavailable {
+		verdict, rationale, err = a.Brain.Verify(ctx, task, input)
+		if err != nil {
+			return true, fmt.Errorf("brain verify: %w", err)
+		}
+		if verdict == "verified" && payload.Status != "success" {
+			verdict, rationale = "inconclusive", "worker did not report a complete success"
+		}
+	}
+
+	resp, err := a.Client.VerifyTask(ctx, task.TaskID, model.VerifyRequest{
+		AttemptID:       job.AttemptID,
+		TargetMessageID: msg.MessageID,
+		Verdict:         verdict,
+		Rationale:       rationale,
+		Evidence:        evidence,
+	})
+	if err != nil {
+		return true, fmt.Errorf("verify %s: %w", task.TaskID, err)
+	}
+	a.logf("verified %s: %s -> %s", task.TaskID, verdict, resp.Task.Status)
+	return true, nil
 }
 
 // takeOneTask claims a single OPEN task this agent didn't create, does the
 // work, and reports it as a RESULT message to the task's creator.
 func (a *Agent) takeOneTask(ctx context.Context) (bool, error) {
-	tasks, err := a.Client.ListTasks(ctx, model.TaskOpen)
+	// Ask the server for tasks relevant to this agent. The server repeats the
+	// same check when claiming, because a client-side query parameter is only
+	// a matching optimisation, never an authorization boundary.
+	toolNames := make([]string, 0, len(a.Tools))
+	for _, tool := range a.Tools {
+		toolNames = append(toolNames, tool.Name)
+	}
+	tasks, err := a.Client.ListTasks(ctx, model.TaskOpen, a.Caps, toolNames)
 	if err != nil {
 		return false, fmt.Errorf("list tasks: %w", err)
 	}
@@ -213,9 +294,15 @@ func (a *Agent) takeOneTask(ctx context.Context) (bool, error) {
 			a.logf("found %d prior knowledge entries for %s", len(prior), claimed.TaskID)
 		}
 
-		summary, status, err := a.Brain.Work(ctx, claimed, prior)
+		workCtx, stopHeartbeat := a.maintainLease(ctx, claimed.TaskID, claimed.ClaimID)
+		summary, status, err := a.Brain.Work(workCtx, claimed, prior)
+		leaseErr := workCtx.Err()
+		stopHeartbeat()
 		if err != nil {
 			return true, fmt.Errorf("brain work: %w", err)
+		}
+		if leaseErr != nil {
+			return true, fmt.Errorf("claim interrupted: %w", leaseErr)
 		}
 
 		if err := a.sendResult(ctx, claimed, summary, status); err != nil {
@@ -228,6 +315,31 @@ func (a *Agent) takeOneTask(ctx context.Context) (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+// maintainLease renews a claim while a potentially slow brain is working.
+func (a *Agent) maintainLease(ctx context.Context, taskID, claimID string) (context.Context, func()) {
+	workCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-workCtx.Done():
+				return
+			case <-ticker.C:
+				if _, err := a.Client.HeartbeatTask(workCtx, taskID, claimID); err != nil {
+					a.logf("heartbeat %s: %v", taskID, err)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return workCtx, func() { close(done); cancel() }
 }
 
 // publishLesson records what the agent learned into shared memory, scoped to
@@ -259,6 +371,7 @@ func (a *Agent) publishLesson(ctx context.Context, task model.Task, summary, sta
 
 func (a *Agent) sendResult(ctx context.Context, task model.Task, summary, status string) error {
 	payload, err := json.Marshal(model.ResultPayload{
+		ClaimID:   task.ClaimID,
 		Summary:   summary,
 		Status:    status,
 		Artifacts: []string{}, // shared memory (RFC-1300) isn't implemented yet

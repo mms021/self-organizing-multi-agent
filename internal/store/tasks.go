@@ -15,6 +15,39 @@ type TaskStore struct{ db *sql.DB }
 
 func NewTaskStore(db *sql.DB) *TaskStore { return &TaskStore{db: db} }
 
+const taskLease = 5 * time.Minute
+
+// RequeueExpired makes abandoned work available again. It is called on task
+// reads and state changes, so recovery needs no separate scheduler process.
+func (s *TaskStore) RequeueExpired(ctx context.Context) error {
+	return s.requeueExpiredAt(ctx, time.Now().UTC())
+}
+
+func (s *TaskStore) requeueExpiredAt(ctx context.Context, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET status=?, owner=NULL, claimed_at=NULL, lease_expires_at=NULL, claim_id=NULL, submitted_message_id=NULL
+		WHERE status=? AND (claim_id IS NULL OR (lease_expires_at IS NOT NULL AND lease_expires_at <= ?))`,
+		model.TaskOpen, model.TaskClaimed, now.UTC().Format(time.RFC3339))
+	return err
+}
+
+// Heartbeat extends a live claim owned by agentID. An expired claim is first
+// requeued, so an old worker cannot revive work already offered to others.
+func (s *TaskStore) Heartbeat(ctx context.Context, taskID, agentID, claimID string) (model.Task, error) {
+	if err := s.RequeueExpired(ctx); err != nil {
+		return model.Task{}, err
+	}
+	now := time.Now().UTC()
+	res, err := s.db.ExecContext(ctx, `UPDATE tasks SET lease_expires_at=? WHERE task_id=? AND status=? AND owner=? AND claim_id=? AND lease_expires_at>?`,
+		now.Add(taskLease).Format(time.RFC3339), taskID, model.TaskClaimed, agentID, claimID, now.Format(time.RFC3339))
+	if err != nil {
+		return model.Task{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return model.Task{}, model.Conflict("task is not actively claimed by this agent")
+	}
+	return s.Get(ctx, agentID, taskID)
+}
+
 // Create inserts a task, or — if idempotencyKey is set and a task with the
 // same (created_by, idempotency_key) already exists — returns that existing
 // task unchanged (RFC-1700 §3).
@@ -28,11 +61,11 @@ func (s *TaskStore) Create(ctx context.Context, createdBy string, req model.Crea
 	}
 
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO tasks (task_id, schema_version, objective, context, constraints, required_capabilities, success_criteria, status, owner, team_id, project_id, created_by, idempotency_key, created_at, deadline)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO tasks (task_id, schema_version, objective, context, constraints, required_capabilities, required_tools, success_criteria, status, owner, team_id, project_id, created_by, idempotency_key, created_at, deadline)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		taskID, "1.0", req.Objective, toJSON(orEmptyMap(req.Context)), toJSON(orEmptySlice(req.Constraints)),
-		toJSON(orEmptySlice(req.RequiredCapabilities)), toJSON(orEmptySlice(req.SuccessCriteria)),
-		model.TaskOpen, nil, nil, nil, createdBy, nullIfEmpty(idempotencyKey), now, deadline,
+		toJSON(orEmptySlice(req.RequiredCapabilities)), toJSON(orEmptySlice(req.RequiredTools)), toJSON(orEmptySlice(req.SuccessCriteria)),
+		model.TaskOpen, nil, nil, nullableString(req.ProjectID), createdBy, nullIfEmpty(idempotencyKey), now, deadline,
 	)
 	if err != nil {
 		if idempotencyKey != "" && isUniqueViolation(err) {
@@ -50,11 +83,11 @@ func (s *TaskStore) Create(ctx context.Context, createdBy string, req model.Crea
 
 func scanTask(row interface{ Scan(...any) error }) (model.Task, error) {
 	var t model.Task
-	var contextJSON, constraintsJSON, reqCapsJSON, successJSON string
-	var owner, teamID, projectID, deadline sql.NullString
+	var contextJSON, constraintsJSON, reqCapsJSON, reqToolsJSON, successJSON string
+	var owner, teamID, projectID, deadline, claimedAt, leaseExpiresAt, claimID, submittedMessageID sql.NullString
 	var createdAtStr string
-	err := row.Scan(&t.TaskID, &t.SchemaVersion, &t.Objective, &contextJSON, &constraintsJSON, &reqCapsJSON,
-		&successJSON, &t.Status, &owner, &teamID, &projectID, &t.CreatedBy, &createdAtStr, &deadline)
+	err := row.Scan(&t.TaskID, &t.SchemaVersion, &t.Objective, &contextJSON, &constraintsJSON, &reqCapsJSON, &reqToolsJSON,
+		&successJSON, &t.Status, &owner, &teamID, &projectID, &t.CreatedBy, &createdAtStr, &deadline, &claimedAt, &leaseExpiresAt, &claimID, &submittedMessageID)
 	if err != nil {
 		return model.Task{}, err
 	}
@@ -62,8 +95,11 @@ func scanTask(row interface{ Scan(...any) error }) (model.Task, error) {
 		t.CreatedAt = createdAt
 	}
 	t.Context = fromJSON[map[string]any](contextJSON)
+	t.ClaimID = claimID.String
+	t.SubmittedMessageID = submittedMessageID.String
 	t.Constraints = fromJSON[[]string](constraintsJSON)
 	t.RequiredCapabilities = fromJSON[[]string](reqCapsJSON)
+	t.RequiredTools = fromJSON[[]string](reqToolsJSON)
 	t.SuccessCriteria = fromJSON[[]string](successJSON)
 	if owner.Valid {
 		t.Owner = &owner.String
@@ -79,15 +115,28 @@ func scanTask(row interface{ Scan(...any) error }) (model.Task, error) {
 			t.Deadline = &d
 		}
 	}
+	if claimedAt.Valid {
+		if v, err := time.Parse(time.RFC3339, claimedAt.String); err == nil {
+			t.ClaimedAt = &v
+		}
+	}
+	if leaseExpiresAt.Valid {
+		if v, err := time.Parse(time.RFC3339, leaseExpiresAt.String); err == nil {
+			t.LeaseExpiresAt = &v
+		}
+	}
 	return t, nil
 }
 
-const taskColumns = `task_id, schema_version, objective, context, constraints, required_capabilities, success_criteria, status, owner, team_id, project_id, created_by, created_at, deadline`
+const taskColumns = `task_id, schema_version, objective, context, constraints, required_capabilities, required_tools, success_criteria, status, owner, team_id, project_id, created_by, created_at, deadline, claimed_at, lease_expires_at, claim_id, submitted_message_id`
 
 // Get returns a task if the viewer may see it. A task inside a closed project
 // the viewer does not belong to reports not_found, not access_denied —
 // confirming a task_id exists is itself a leak (RFC-1250 §13).
 func (s *TaskStore) Get(ctx context.Context, viewer, taskID string) (model.Task, error) {
+	if err := s.RequeueExpired(ctx); err != nil {
+		return model.Task{}, err
+	}
 	args := append([]any{taskID}, visibleScopeArgs(viewer, true)...)
 	row := s.db.QueryRowContext(ctx,
 		`SELECT `+taskColumns+` FROM tasks WHERE task_id=? AND `+visibleScopeSQL("task_id"), args...)
@@ -101,10 +150,12 @@ func (s *TaskStore) Get(ctx context.Context, viewer, taskID string) (model.Task,
 	return t, nil
 }
 
-// List returns tasks matching filter, newest-first-created ascending keyset
-// pagination on (created_at, task_id). required_capabilities is matched in
-// Go (any overlap) rather than in SQL, since it's a JSON array column.
+// List returns matching tasks in ascending (created_at, task_id) order.
+// Match requirements before LIMIT so unrelated work cannot hide later matches.
 func (s *TaskStore) List(ctx context.Context, viewer string, filter model.TaskFilter) ([]model.Task, string, error) {
+	if err := s.RequeueExpired(ctx); err != nil {
+		return nil, "", err
+	}
 	limit := filter.Limit
 	if limit <= 0 || limit > 100 {
 		limit = 50
@@ -116,6 +167,14 @@ func (s *TaskStore) List(ctx context.Context, viewer string, filter model.TaskFi
 		where = append(where, "status = ?")
 		args = append(args, filter.Status)
 	}
+	if filter.ProjectID != nil {
+		if *filter.ProjectID == "" {
+			where = append(where, "project_id IS NULL")
+		} else {
+			where = append(where, "project_id = ?")
+			args = append(args, *filter.ProjectID)
+		}
+	}
 	if filter.Cursor != "" {
 		ts, id, ok := decodeCursor(filter.Cursor)
 		if !ok {
@@ -125,16 +184,27 @@ func (s *TaskStore) List(ctx context.Context, viewer string, filter model.TaskFi
 		args = append(args, ts, ts, id)
 	}
 
-	q := `SELECT ` + taskColumns + ` FROM tasks WHERE ` + strings.Join(where, " AND ")
-	// Fetch one extra row to know whether a next page exists, and fetch more
-	// than the page size when filtering by capability in Go so a capability
-	// filter doesn't starve the page.
-	fetchLimit := limit + 1
-	if len(filter.RequiredCapabilities) > 0 {
-		fetchLimit = limit*4 + 1
+	// Empty requirements are eligible for everyone; otherwise require any
+	// overlap within each supplied filter, and AND capabilities with tools.
+	for _, match := range []struct {
+		column string
+		values []string
+	}{
+		{"required_capabilities", filter.RequiredCapabilities},
+		{"required_tools", filter.RequiredTools},
+	} {
+		if len(match.values) == 0 {
+			continue
+		}
+		column := "tasks." + match.column // fixed column names, never user input
+		where = append(where, `(json_array_length(`+column+`)=0 OR EXISTS (
+			SELECT 1 FROM json_each(`+column+`) AS requirement
+			JOIN json_each(?) AS available ON requirement.value=available.value))`)
+		args = append(args, toJSON(match.values))
 	}
+	q := `SELECT ` + taskColumns + ` FROM tasks WHERE ` + strings.Join(where, " AND ")
 	q += " ORDER BY created_at, task_id LIMIT ?"
-	args = append(args, fetchLimit)
+	args = append(args, limit+1)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -147,9 +217,6 @@ func (s *TaskStore) List(ctx context.Context, viewer string, filter model.TaskFi
 		t, err := scanTask(rows)
 		if err != nil {
 			return nil, "", err
-		}
-		if len(filter.RequiredCapabilities) > 0 && !hasAnyCapability(t.RequiredCapabilities, filter.RequiredCapabilities) {
-			continue
 		}
 		tasks = append(tasks, t)
 		if len(tasks) == limit+1 {
@@ -185,13 +252,17 @@ func hasAnyCapability(have, want []string) bool {
 // Claim performs the OPEN -> CLAIMED compare-and-swap (RFC-1000 §8's own
 // example of a `conflict` error).
 func (s *TaskStore) Claim(ctx context.Context, taskID, agentID string) (model.Task, error) {
+	if err := s.RequeueExpired(ctx); err != nil {
+		return model.Task{}, err
+	}
 	// Resolve through the scoped read first: a task in a closed project the
 	// claimer does not belong to must look absent, not merely unclaimable.
 	if _, err := s.Get(ctx, agentID, taskID); err != nil {
 		return model.Task{}, err
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE tasks SET status=?, owner=? WHERE task_id=? AND status=?`,
-		model.TaskClaimed, agentID, taskID, model.TaskOpen)
+	now := time.Now().UTC()
+	res, err := s.db.ExecContext(ctx, `UPDATE tasks SET status=?, owner=?, claimed_at=?, lease_expires_at=?, claim_id=?, submitted_message_id=NULL WHERE task_id=? AND status=?`,
+		model.TaskClaimed, agentID, now.Format(time.RFC3339), now.Add(taskLease).Format(time.RFC3339), idgen.New("claim"), taskID, model.TaskOpen)
 	if err != nil {
 		return model.Task{}, err
 	}
@@ -220,16 +291,17 @@ func (s *TaskStore) Verify(ctx context.Context, taskID, verifierID string, req m
 	}
 	defer tx.Rollback()
 
-	var status string
-	err = tx.QueryRowContext(ctx, `SELECT status FROM tasks WHERE task_id=?`, taskID).Scan(&status)
+	var status, createdBy string
+	var submittedMessageID sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT status, created_by, submitted_message_id FROM tasks WHERE task_id=?`, taskID).Scan(&status, &createdBy, &submittedMessageID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Task{}, model.Verification{}, model.NotFound("task not found")
 	}
 	if err != nil {
 		return model.Task{}, model.Verification{}, err
 	}
-	if status != model.TaskClaimed {
-		return model.Task{}, model.Verification{}, model.Conflict("task is not CLAIMED").WithDetails(map[string]string{"status": status})
+	if status != model.TaskSubmitted {
+		return model.Task{}, model.Verification{}, model.Conflict("task is not SUBMITTED").WithDetails(map[string]string{"status": status})
 	}
 
 	var msgType, msgTaskID string
@@ -251,9 +323,18 @@ func (s *TaskStore) Verify(ctx context.Context, taskID, verifierID string, req m
 	if msgSender.Valid && msgSender.String == verifierID {
 		return model.Task{}, model.Verification{}, model.ValidationError("verifier must not be the RESULT's sender")
 	}
+	if createdBy != verifierID {
+		return model.Task{}, model.Verification{}, model.AccessDenied("only the task creator may verify its result")
+	}
+	if submittedMessageID.String != req.TargetMessageID {
+		return model.Task{}, model.Verification{}, model.Conflict("target is not the accepted result for this attempt")
+	}
 
 	verID := idgen.New("verification")
 	now := time.Now().UTC()
+	if err := finishVerificationJob(ctx, tx, taskID, req, now); err != nil {
+		return model.Task{}, model.Verification{}, err
+	}
 	nowStr := now.Format(time.RFC3339)
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO verifications (verification_id, schema_version, task_id, verifier_id, target_message_id, verdict, rationale, evidence, ts)

@@ -47,6 +47,27 @@ func (s *Server) projectFor(r *http.Request, projectID, agentID string) (model.P
 	return model.Project{}, false, model.NotFound("project not found")
 }
 
+// requireProjectWriter is the state-changing counterpart to projectFor.
+// Reviewer grants intentionally fail here: their narrow task visibility is
+// for inspection, never for publishing, claiming or mutating evidence.
+func (s *Server) requireProjectWriter(r *http.Request, projectID, agentID string) error {
+	project, err := s.Projects.Get(r.Context(), projectID)
+	if err != nil {
+		return err
+	}
+	if project.Status != model.ProjectActive {
+		return model.Conflict("cannot write to an archived project")
+	}
+	canWrite, err := s.Members.CanRead(r.Context(), projectID, agentID)
+	if err != nil {
+		return err
+	}
+	if !canWrite {
+		return model.AccessDenied("project access is read-only")
+	}
+	return nil
+}
+
 func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 	agentID, _ := AgentIDFromContext(r.Context())
 

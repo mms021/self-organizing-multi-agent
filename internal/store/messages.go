@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -42,7 +43,12 @@ func (s *MessageStore) Insert(ctx context.Context, env model.Envelope) (model.En
 		ttl = *env.TTL
 	}
 
-	res, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Envelope{}, false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `
 		INSERT OR IGNORE INTO messages (`+messageInsertColumns+`)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		env.MessageID, env.ProtocolVersion, env.Type, env.Sender, env.Recipient,
@@ -54,8 +60,32 @@ func (s *MessageStore) Insert(ctx context.Context, env model.Envelope) (model.En
 	}
 	n, _ := res.RowsAffected()
 
-	stored, err := s.Get(ctx, env.MessageID)
+	stored, _, err := scanMessage(tx.QueryRowContext(ctx, `SELECT `+messageSelectColumns+` FROM messages WHERE message_id=?`, env.MessageID))
 	if err != nil {
+		return model.Envelope{}, false, err
+	}
+	if stored.Sender != env.Sender {
+		return model.Envelope{}, false, model.Conflict("message_id is already in use")
+	}
+	if n > 0 && env.Type == "RESULT" && env.TaskID != "" {
+		var payload model.ResultPayload
+		if json.Unmarshal(env.Payload, &payload) != nil || payload.ClaimID == "" {
+			return model.Envelope{}, false, model.ValidationError("task RESULT requires payload.claim_id")
+		}
+		res, err := tx.ExecContext(ctx, `UPDATE tasks SET status=?, submitted_message_id=?, lease_expires_at=NULL
+			WHERE task_id=? AND status=? AND owner=? AND created_by=? AND claim_id=? AND lease_expires_at>?`,
+			model.TaskSubmitted, env.MessageID, env.TaskID, model.TaskClaimed, env.Sender, env.Recipient, payload.ClaimID, time.Now().UTC().Format(time.RFC3339))
+		if err != nil {
+			return model.Envelope{}, false, err
+		}
+		if count, _ := res.RowsAffected(); count != 1 {
+			return model.Envelope{}, false, model.Conflict("result requires a live matching claim")
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO verification_jobs(task_id, message_id, next_at) VALUES(?,?,?)`, env.TaskID, env.MessageID, now); err != nil {
+			return model.Envelope{}, false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return model.Envelope{}, false, err
 	}
 	return stored, n > 0, nil
